@@ -1,23 +1,11 @@
 {
-  "$schema": "https://mintlify.com/docs.json",
-  "name": "GoodJob",
+  "projectType": "sdk-library",
+  "projectName": "GoodJob",
+  "projectDescription": "A multithreaded, Postgres-based Active Job backend for Ruby on Rails that provides reliable job execution, concurrency controls, cron scheduling, batches, and a built-in web dashboard.",
   "theme": "palm",
-  "colors": {
-    "primary": "#22863a",
-    "light": "#d4edda",
-    "dark": "#145523"
-  },
-  "navbar": {
-    "primary": {
-      "type": "github",
-      "href": "https://github.com/bensheldon/good_job"
-    }
-  },
-  "footer": {
-    "socials": {
-      "github": "https://github.com/bensheldon/good_job"
-    }
-  },
+  "primaryColor": "#22863a",
+  "lightColor": "#d4edda",
+  "darkColor": "#145523",
   "navigation": {
     "tabs": [
       {
@@ -99,5 +87,42 @@
         ]
       }
     ]
-  }
+  },
+  "keyFeatures": [
+    "Multithreaded job execution backed by PostgreSQL ACID transactions and advisory locks",
+    "Native Postgres LISTEN/NOTIFY for low-latency job pickup",
+    "Concurrency controls and throttling at enqueue and perform time",
+    "Cron-style repeating/recurring job scheduling via the fugit gem",
+    "Job batches with finish/success/discard callbacks",
+    "Bulk enqueue via single INSERT statement",
+    "Built-in web dashboard (mountable Rails Engine) with live polling",
+    "Job labels for metadata, search, and concurrency scoping",
+    "Pausing job execution by queue or job class",
+    "HTTP health check probes for Kubernetes/containerized deployments",
+    "Systemd sd_notify integration",
+    "PgBouncer compatibility via SKIP LOCKED strategy"
+  ],
+  "publicApiSurface": [
+    "GoodJob.configure_active_record",
+    "GoodJob.active_record_parent_class=",
+    "GoodJob.preserve_job_records=",
+    "GoodJob.retry_on_unhandled_error=",
+    "GoodJob.on_thread_error=",
+    "GoodJob.shutdown",
+    "GoodJob.restart",
+    "GoodJob.perform_inline",
+    "GoodJob.cleanup_preserved_jobs",
+    "GoodJob.pause / GoodJob.unpause / GoodJob.paused?",
+    "GoodJob::Bulk.enqueue",
+    "GoodJob::Batch.enqueue / GoodJob::Batch.new",
+    "GoodJob::ActiveJobExtensions::Concurrency (good_job_concurrency_rule, good_job_control_concurrency_with)",
+    "GoodJob::ActiveJobExtensions::Batches",
+    "GoodJob::ActiveJobExtensions::Labels",
+    "GoodJob::ActiveJobExtensions::InterruptErrors",
+    "GoodJob::Engine (mountable Rails dashboard)",
+    "good_job start (CLI)",
+    "good_job cleanup_preserved_jobs (CLI)",
+    "bin/rails g good_job:install",
+    "bin/rails g good_job:update"
+  ]
 }

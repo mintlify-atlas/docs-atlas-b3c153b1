@@ -1,0 +1,41 @@
+---
+title: "GoodJob changelog and recent release notes"
+description: "Recent GoodJob release highlights for v4.x, with links to the full version history and detailed changelog on GitHub."
+---
+
+GoodJob publishes a detailed changelog for every release. The full history — including every patch, minor, and major version — is available in [CHANGELOG.md on GitHub](https://github.com/bensheldon/good_job/blob/main/CHANGELOG.md). The sections below highlight the most notable recent releases in the v4.x series.
+
+## Recent releases
+
+### v4.18.2 — April 20, 2026
+
+- Added dashboard indexes on `queue_name`, `created_at`, and discarded jobs for faster filtering.
+- Fixed an `ArgumentError` raised when using `perform_throttle` without a label.
+- Improved dashboard job count performance using complement subtraction for succeeded counts.
+- Optimized the `ScheduledByQueueChart` query with inner-query pushdown and a compound index.
+
+### v4.18.1 — April 18, 2026
+
+- Fixed job lifecycle methods to respect the configured lock strategy.
+- Fixed a race condition causing concurrent PostgreSQL connection access in `ProcessHeartbeat#refresh_process`.
+
+### v4.18.0 — April 17, 2026
+
+- Introduced `GoodJob::InterruptedError` string for interrupted execution records, making error identification more precise.
+- Added `GoodJob.handled_exceptions` configuration option; `NotImplementedError` is now included in the handled set by default, so it no longer causes indefinite retries.
+- Allowed adding the currently executing job to a batch from within the job itself.
+- Made bulk action buttons in the dashboard respond to the active job state filter.
+- Added split enabled/paused badge for cron schedules in the navbar.
+- Fixed dashboard pagination omitting jobs created in the same second as the preceding page boundary.
+
+<Note>
+Full details for every release, including merged pull requests and closed issues, are in the [complete changelog on GitHub](https://github.com/bensheldon/good_job/blob/main/CHANGELOG.md).
+</Note>
+
+## Other recent highlights
+
+- **v4.17.0** — Introduced advisory lock key customization support methods; converted UI JavaScript modules to Stimulus controllers.
+- **v4.16.0** — Added label-based filtering on the dashboard; allowed multiple concurrency rules per job via labels; fixed advisory lock connection stickiness in block contexts.
+- **v4.15.0** — Added opt-in `FOR NO KEY UPDATE SKIP LOCKED` job lock strategy (and a hybrid strategy for online migrations); allowed ordering by `scheduled_at` instead of `created_at` when dequeueing; allowed `GoodJob.preserve_job_records` to accept a callable lambda.
+- **v4.14.x** — Added `Batch.enqueue_all` for bulk-enqueuing multiple batches; allowed `perform_all_later` to enqueue into batches; replaced `Base.connection` with `lease_connection` and `with_connection` throughout for compatibility with `permanent_connection_checkout = :disallowed`.
+- **v4.13.x** — Fixed text search scope using mismatched configurations; fixed `--daemonize` changing the working directory; improved graceful shutdown handling inside job cleanup loops.

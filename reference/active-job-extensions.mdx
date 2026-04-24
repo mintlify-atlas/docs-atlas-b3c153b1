@@ -1,0 +1,328 @@
+---
+title: "Active Job extensions API reference"
+description: "Reference for GoodJob's opt-in Active Job extension modules: concurrency controls, batches, labels, interrupt errors, and notify options."
+---
+
+GoodJob ships several opt-in `ActiveSupport::Concern` modules that extend `ActiveJob::Base` with GoodJob-specific features. Include the ones you need in `ApplicationJob` (for all jobs) or in individual job classes. None of these modules are included by default — you must `include` them explicitly.
+
+<Tabs>
+  <Tab title="Concurrency">
+
+## `GoodJob::ActiveJobExtensions::Concurrency`
+
+Limits how many instances of a job are enqueued or running at the same time. GoodJob enforces limits using Postgres advisory locks inside a transaction, so the check is atomic and safe for concurrent workers.
+
+```ruby
+class ApplicationJob < ActiveJob::Base
+  include GoodJob::ActiveJobExtensions::Concurrency
+end
+```
+
+### `good_job_concurrency_rule`
+
+The primary API. Appends a concurrency rule to the job class. Multiple rules are evaluated in order — the first rule that is exceeded short-circuits enqueue or perform.
+
+```ruby
+class ProcessReportJob < ApplicationJob
+  include GoodJob::ActiveJobExtensions::Concurrency
+
+  # At most 3 instances of this job may be running simultaneously
+  good_job_concurrency_rule(
+    label: "process-report",
+    perform_limit: 3
+  )
+end
+```
+
+#### Parameters
+
+<ParamField path="label" type="string | Proc">
+  A string (or a lambda evaluated in job context returning a string) used as the concurrency scope. When set, GoodJob counts jobs sharing this label rather than a key. Use labels when multiple job classes should share a single concurrency budget.
+
+  ```ruby
+  good_job_concurrency_rule(label: "email-provider", perform_limit: 5)
+
+  # Dynamic label based on job arguments
+  good_job_concurrency_rule(label: -> { "tenant-#{tenant_id}" }, perform_limit: 2)
+  ```
+</ParamField>
+
+<ParamField path="key" type="string | Proc">
+  An explicit concurrency key. When omitted and `label` is also absent, defaults to the job class name. Accepts a lambda evaluated in job context.
+
+  ```ruby
+  good_job_concurrency_rule(
+    key: -> { "#{self.class.name}-#{arguments.first}" },
+    perform_limit: 1
+  )
+  ```
+</ParamField>
+
+<ParamField path="total_limit" type="Integer | Proc">
+  Maximum number of jobs with this key/label allowed to be **enqueued or running** at once (unfinished). Acts as both an enqueue and perform limit. Accepts a lambda that returns an integer or `nil` (no limit).
+</ParamField>
+
+<ParamField path="enqueue_limit" type="Integer | Proc">
+  Maximum number of jobs allowed to be **waiting in the queue** (not yet performing) at once. Enqueue is aborted when the limit is reached. Does not count jobs that are actively running.
+</ParamField>
+
+<ParamField path="perform_limit" type="Integer | Proc">
+  Maximum number of jobs that may **run concurrently**. A job that cannot acquire a perform slot raises `ConcurrencyExceededError` and is automatically retried with exponential back-off.
+</ParamField>
+
+<ParamField path="enqueue_throttle" type="Array(Integer, ActiveSupport::Duration)">
+  Rate limit for enqueueing. Accepts a two-element array: `[count, period]`. Aborts enqueue if `count` or more jobs were enqueued within `period`.
+
+  ```ruby
+  good_job_concurrency_rule(
+    enqueue_throttle: [10, 1.minute]
+  )
+  ```
+</ParamField>
+
+<ParamField path="perform_throttle" type="Array(Integer, ActiveSupport::Duration)">
+  Rate limit for performing. Accepts `[count, period]`. A job that exceeds the rate raises `ThrottleExceededError` and is retried.
+
+  ```ruby
+  good_job_concurrency_rule(
+    perform_throttle: [5, 30.seconds]
+  )
+  ```
+</ParamField>
+
+### Concurrency errors
+
+| Class | Description |
+|---|---|
+| `GoodJob::ActiveJobExtensions::Concurrency::ConcurrencyExceededError` | Raised during perform when `perform_limit` or `total_limit` is exceeded. Automatically retried with back-off. |
+| `GoodJob::ActiveJobExtensions::Concurrency::ThrottleExceededError` | Raised during perform when `perform_throttle` is exceeded. Subclass of `ConcurrencyExceededError`. |
+
+Both exceptions have empty backtraces to reduce log noise.
+
+<Note>
+  When a job's concurrency limit is reached at **enqueue time**, `throw :abort` is called inside the `before_enqueue` callback and the job is silently dropped — no exception is raised to the caller. To detect this, check `job.successfully_enqueued?` after calling `perform_later`.
+</Note>
+
+### `good_job_control_concurrency_with` (legacy)
+
+The previous single-rule API. Still supported, but `good_job_concurrency_rule` is preferred for new code. Accepts the same parameter keys.
+
+```ruby
+class LegacyJob < ApplicationJob
+  include GoodJob::ActiveJobExtensions::Concurrency
+
+  good_job_control_concurrency_with(
+    key:           -> { "#{self.class.name}-#{arguments.first}" },
+    total_limit:   1,
+    enqueue_limit: 1,
+    perform_limit: 1
+  )
+end
+```
+
+<AccordionGroup>
+  <Accordion title="How limits are counted">
+    - `total_limit` and `perform_limit` count **running** jobs (records currently locked by a worker).
+    - `enqueue_limit` counts **unfinished, not-running** jobs (waiting in the queue). The legacy `good_job_control_concurrency_with` API uses `advisory_unlocked` to exclude performing jobs; `good_job_concurrency_rule` counts all unfinished jobs.
+    - Throttle limits count matching job executions (or enqueue records) created within the rolling period.
+  </Accordion>
+  <Accordion title="Retry behavior">
+    When a `ConcurrencyExceededError` is raised at perform time, GoodJob's `retry_on` declaration (added automatically when you include the module) re-enqueues the job with `polynomially_longer` back-off (Rails 7.1+) or `exponentially_longer` back-off (Rails 7.0 and earlier). The retry count is `Float::INFINITY`.
+  </Accordion>
+</AccordionGroup>
+
+  </Tab>
+  <Tab title="Batches">
+
+## `GoodJob::ActiveJobExtensions::Batches`
+
+Gives job instances access to the `GoodJob::Batch` they belong to while they are executing.
+
+```ruby
+class ApplicationJob < ActiveJob::Base
+  include GoodJob::ActiveJobExtensions::Batches
+end
+```
+
+### `batch` / `batch?`
+
+An instance method available inside `perform`. Returns the `GoodJob::Batch` that owns the current execution, or `nil` if the job is not part of a batch.
+
+<ResponseField name="return" type="GoodJob::Batch | nil">
+  The batch object, or `nil` when not inside a batch context.
+</ResponseField>
+
+```ruby
+class MyJob < ApplicationJob
+  include GoodJob::ActiveJobExtensions::Batches
+
+  def perform
+    if batch?
+      Rails.logger.info "Running inside batch #{batch.id}"
+      # Read custom properties stored on the batch
+      tenant_id = batch.properties[:tenant_id]
+    end
+  end
+end
+```
+
+`batch?` is an alias for `batch` — both return `nil` (falsey) when the job is not part of a batch, so the alias is useful for conditional checks.
+
+<Note>
+  `batch` returns `nil` when the job is executed via `perform_now`, because `CurrentThread.job` is not set in that context.
+</Note>
+
+  </Tab>
+  <Tab title="Labels">
+
+## `GoodJob::ActiveJobExtensions::Labels`
+
+Attaches arbitrary string tags to individual jobs. Labels appear in the web dashboard's filter controls and can be inspected at runtime inside `perform`.
+
+```ruby
+class ApplicationJob < ActiveJob::Base
+  include GoodJob::ActiveJobExtensions::Labels
+end
+```
+
+### Class-level default labels
+
+Set default labels that every instance of the job class inherits.
+
+```ruby
+class EmailJob < ApplicationJob
+  self.good_job_labels = ["email", "notifications"]
+end
+```
+
+<ParamField path="good_job_labels" type="Array<string>">
+  Array of label strings applied to every job enqueued from this class. Defaults to `[]`.
+</ParamField>
+
+### Per-enqueue labels
+
+Override or add labels when calling `.set` before `perform_later`.
+
+```ruby
+EmailJob.set(good_job_labels: ["transactional"]).perform_later(user)
+```
+
+When `.set(good_job_labels:)` is called, the instance-level labels are **replaced** with the given array (class defaults are not merged).
+
+### Instance accessor
+
+Inside `perform`, read the labels assigned to the currently executing job.
+
+```ruby
+def perform(user)
+  puts good_job_labels # => ["email", "transactional"]
+end
+```
+
+<ParamField path="good_job_labels" type="Array<string>">
+  Instance accessor. Readable and writable within the job. Persisted with the job record via serialization.
+</ParamField>
+
+### Pausing by label
+
+Labels integrate with `GoodJob.pause` / `GoodJob.unpause`:
+
+```ruby
+GoodJob.pause(queue: nil, job_class: nil)  # pause is not label-aware at this level
+GoodJob.unpause(label: "email")            # unpause all jobs with label "email"
+GoodJob.paused?(label: "email")            # => false
+```
+
+  </Tab>
+  <Tab title="InterruptErrors">
+
+## `GoodJob::ActiveJobExtensions::InterruptErrors`
+
+Raises `GoodJob::InterruptError` at the start of `perform` when GoodJob detects the previous execution of this job was interrupted (e.g., the process was killed mid-job). This surfaces the interruption so you can handle or discard it explicitly.
+
+```ruby
+class ApplicationJob < ActiveJob::Base
+  include GoodJob::ActiveJobExtensions::InterruptErrors
+end
+```
+
+### `GoodJob::InterruptError`
+
+A subclass of `StandardError` raised when a job's previous execution was interrupted before it could finish.
+
+### Handling interrupt errors
+
+Use Active Job's `retry_on` or `discard_on` to respond to `GoodJob::InterruptError`:
+
+```ruby
+class MyJob < ApplicationJob
+  include GoodJob::ActiveJobExtensions::InterruptErrors
+
+  # Discard the job instead of retrying when interrupted
+  discard_on GoodJob::InterruptError
+
+  def perform
+    # ...
+  end
+end
+```
+
+```ruby
+class MyJob < ApplicationJob
+  include GoodJob::ActiveJobExtensions::InterruptErrors
+
+  # Retry up to 3 times, waiting 5 seconds between attempts
+  retry_on GoodJob::InterruptError, attempts: 3, wait: 5.seconds
+
+  def perform
+    # ...
+  end
+end
+```
+
+<Warning>
+  Without this extension, an interrupted job is silently re-enqueued with no indication that a previous execution was cut short. Include `InterruptErrors` when your jobs must not execute more than once per enqueue (idempotency-sensitive work).
+</Warning>
+
+  </Tab>
+  <Tab title="NotifyOptions">
+
+## `GoodJob::ActiveJobExtensions::NotifyOptions`
+
+Controls whether GoodJob emits a Postgres `NOTIFY` event when a job is enqueued. By default, GoodJob sends a NOTIFY so workers pick up the job immediately. Disabling NOTIFY can reduce Postgres load for high-frequency jobs where polling is acceptable.
+
+```ruby
+class ApplicationJob < ActiveJob::Base
+  include GoodJob::ActiveJobExtensions::NotifyOptions
+end
+```
+
+### Class-level default
+
+```ruby
+class HighVolumeJob < ApplicationJob
+  include GoodJob::ActiveJobExtensions::NotifyOptions
+
+  # Suppress NOTIFY for every instance of this job class
+  self.good_job_notify = false
+end
+```
+
+<ParamField path="good_job_notify" type="Boolean | nil">
+  `nil` (default) defers to GoodJob's global notify behavior. `false` suppresses NOTIFY for this job class. `true` forces NOTIFY even if the global default is off.
+</ParamField>
+
+### Per-enqueue override
+
+```ruby
+# Suppress NOTIFY for a single enqueue
+HighVolumeJob.set(good_job_notify: false).perform_later(record)
+
+# Force NOTIFY for a single enqueue
+MyJob.set(good_job_notify: true).perform_later(record)
+```
+
+The per-enqueue value overrides the class-level default and is serialized with the job so retries inherit the same setting.
+
+  </Tab>
+</Tabs>

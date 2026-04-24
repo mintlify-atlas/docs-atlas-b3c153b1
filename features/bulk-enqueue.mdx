@@ -1,0 +1,64 @@
+---
+title: "Bulk Enqueue: Insert Multiple Jobs in One Statement"
+description: "Use GoodJob::Bulk.enqueue to buffer multiple jobs and insert them all at once, reducing database round-trips and ensuring transactional safety."
+---
+
+Bulk enqueue lets you capture multiple `.perform_later` calls and flush them to the database in a single `INSERT` statement. This reduces the number of database round-trips when you need to enqueue a large number of jobs at once, and provides transactional safety — if an exception is raised inside the block, no jobs are inserted.
+
+## Block form
+
+Wrap your `.perform_later` calls in a `GoodJob::Bulk.enqueue` block. All jobs enqueued inside the block are buffered in memory and inserted together when the block exits.
+
+```ruby
+active_jobs = GoodJob::Bulk.enqueue do
+  MyJob.perform_later
+  AnotherJob.perform_later
+  # If an exception is raised here, no jobs will be inserted.
+end
+```
+
+`GoodJob::Bulk.enqueue` returns an array of Active Job instances. You can check `provider_job_id` on each instance to confirm it was successfully inserted.
+
+```ruby
+active_jobs.all? { |job| job.provider_job_id.present? }
+# => true when all jobs were enqueued successfully
+```
+
+<Note>
+If an exception is raised anywhere inside the block, the entire buffer is discarded and no jobs are inserted into the database.
+</Note>
+
+## Array form
+
+Pass an array of already-instantiated Active Job objects directly to `GoodJob::Bulk.enqueue`. Use this when you need to build the job list before enqueuing.
+
+```ruby
+jobs = [MyJob.new, AnotherJob.new]
+active_jobs = GoodJob::Bulk.enqueue(jobs)
+```
+
+<Warning>
+Do not pass a block and an array at the same time. `GoodJob::Bulk.enqueue` raises an `ArgumentError` if both are provided.
+</Warning>
+
+## Performance benefit
+
+Each call to `.perform_later` normally issues its own `INSERT` statement. When enqueuing dozens or hundreds of jobs in a loop, this adds up quickly. Bulk enqueue batches all of those inserts into one statement, significantly reducing database load.
+
+```ruby
+# Without bulk enqueue — N separate INSERT statements:
+records.each { |record| ProcessRecordJob.perform_later(record.id) }
+
+# With bulk enqueue — a single INSERT statement:
+GoodJob::Bulk.enqueue do
+  records.each { |record| ProcessRecordJob.perform_later(record.id) }
+end
+```
+
+## Concurrency controls and bulk enqueue
+
+Jobs that have an active enqueue-time concurrency limit (`enqueue_limit` or `total_limit`) are excluded from the bulk INSERT and enqueued individually. This preserves correct concurrency behavior for those jobs while still batching the rest.
+
+<Tip>
+If all jobs in your bulk block have enqueue-time concurrency limits, there is no performance gain from using `GoodJob::Bulk.enqueue`. Use it when at least some jobs are not concurrency-limited.
+</Tip>

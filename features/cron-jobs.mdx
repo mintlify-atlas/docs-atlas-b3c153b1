@@ -1,0 +1,212 @@
+---
+title: "Cron Jobs: Schedule Recurring Active Job Tasks in Rails"
+description: "Schedule repeating Active Job jobs with cron expressions, natural language schedules, and dynamic lambdas using GoodJob's built-in cron support."
+---
+
+GoodJob can enqueue Active Job jobs on a recurring schedule, serving as a drop-in replacement for system cron. Scheduled jobs are defined in your Rails configuration, parsed by the [`fugit`](https://github.com/floraison/fugit) gem, and enqueued by any GoodJob process that has cron enabled. GoodJob prevents duplicate enqueuing across multiple processes using unique database indexes, so you can run cron on multiple processes without risk of double-enqueuing.
+
+---
+
+## Enabling cron
+
+<Steps>
+  <Step title="Enable cron in your environment config">
+    Set `enable_cron` to `true` in the environments where you want recurring jobs to fire. This is
+    typically `config/application.rb` for all environments, or a specific file like
+    `config/environments/production.rb`.
+
+    ```ruby
+    # config/environments/production.rb
+    config.good_job.enable_cron = true
+    ```
+  </Step>
+
+  <Step title="Define your cron schedule">
+    Configure the `cron` option with a hash. Each key is a unique identifier for the recurring
+    job; each value is a configuration hash describing the schedule and job to enqueue.
+
+    ```ruby
+    config.good_job.cron = {
+      frequent_task: {
+        cron: "*/15 * * * *",
+        class: "ExampleJob",
+        args: [42, "life"],
+        kwargs: { name: "Alice" },
+        set: { priority: -10 },
+        description: "Runs ExampleJob every 15 minutes"
+      }
+    }
+    ```
+  </Step>
+
+  <Step title="(Optional) Configure graceful restart">
+    Set `cron_graceful_restart_period` if you deploy without zero-downtime restarts. During this
+    window after startup, GoodJob will re-attempt any scheduled intervals it may have missed.
+
+    ```ruby
+    config.good_job.cron_graceful_restart_period = 1.minute
+    ```
+  </Step>
+</Steps>
+
+---
+
+## Cron schedule formats
+
+GoodJob uses the `fugit` gem to parse schedule strings, which supports several formats:
+
+<Tabs>
+  <Tab title="Standard cron">
+    Five-field cron syntax: minute, hour, day-of-month, month, day-of-week.
+
+    ```ruby
+    cron: "*/15 * * * *"   # every 15 minutes
+    cron: "0 0,12 * * *"   # midnight and noon daily
+    cron: "0 9 * * 1"      # 9 AM every Monday
+    ```
+  </Tab>
+  <Tab title="Seconds-level">
+    Six-field syntax adds a seconds field at the start.
+
+    ```ruby
+    cron: "*/30 * * * * *"  # every 30 seconds
+    cron: "* * * * * *"     # every second
+    ```
+  </Tab>
+  <Tab title="Natural language">
+    `fugit` accepts human-readable schedules as well.
+
+    ```ruby
+    cron: "every second"
+    cron: "every 5 minutes"
+    cron: "every day at noon"
+    ```
+  </Tab>
+  <Tab title="Dynamic lambda">
+    Pass a lambda that receives `last_ran` (a `Time` or `nil` for the first run) and returns
+    the next run time as a `Time` object.
+
+    ```ruby
+    cron: -> (last_ran) {
+      (last_ran.blank? ? Time.now : last_ran + 14.hours).at_beginning_of_minute
+    }
+    ```
+
+    Use this when you need scheduling logic that can't be expressed as a static cron string —
+    for example, relative intervals or business-hour-aware schedules.
+  </Tab>
+</Tabs>
+
+---
+
+## Cron configuration reference
+
+Each entry in the `config.good_job.cron` hash accepts the following options:
+
+<ParamField path="cron" type="String | Proc" required>
+  The schedule expression. Accepts standard 5-field cron, 6-field cron with seconds, fugit
+  natural language strings, or a lambda that receives `last_ran` and returns a `Time`.
+</ParamField>
+
+<ParamField path="class" type="String" required>
+  The job class name as a string. Must reference a class that inherits from `ApplicationJob`
+  (or `ActiveJob::Base`).
+</ParamField>
+
+<ParamField path="args" type="Array | Proc">
+  Positional arguments forwarded to `perform_later`. Can also be a `Proc`/lambda evaluated at
+  enqueue time, useful for dynamic values like `-> { [Time.now] }`.
+</ParamField>
+
+<ParamField path="kwargs" type="Hash | Proc">
+  Keyword arguments forwarded to `perform_later`. Can be a `Proc`/lambda evaluated at enqueue
+  time, e.g. `-> { { name: NAMES.sample } }`.
+</ParamField>
+
+<ParamField path="set" type="Hash | Proc">
+  Additional Active Job properties passed via `.set(...)` before `perform_later`. Common uses
+  include `priority` and `queue`. Can be a lambda, e.g. `-> { { priority: [1, 2].sample } }`.
+</ParamField>
+
+<ParamField path="description" type="String">
+  A human-readable description displayed in the GoodJob Dashboard cron view.
+</ParamField>
+
+<ParamField path="enabled_by_default" type="Boolean | Proc">
+  Whether the task is enabled when the process starts. Defaults to `true`. Set to a lambda to
+  conditionally enable based on environment or other runtime state. Tasks disabled by default
+  can still be triggered manually from the Dashboard.
+
+  ```ruby
+  enabled_by_default: -> { Rails.env.production? }
+  ```
+</ParamField>
+
+---
+
+## Full configuration example
+
+```ruby
+# config/environments/production.rb
+
+config.good_job.enable_cron = true
+config.good_job.cron_graceful_restart_period = 1.minute
+
+config.good_job.cron = {
+  # Every 15 minutes: ExampleJob.set(priority: -10).perform_later(42, "life", name: "Alice")
+  frequent_task: {
+    cron: "*/15 * * * *",
+    class: "ExampleJob",
+    args: [42, "life"],
+    kwargs: { name: "Alice" },
+    set: { priority: -10 },
+    description: "Something helpful"
+  },
+
+  # Twice daily, but only active in production
+  production_task: {
+    cron: "0 0,12 * * *",
+    class: "ProductionJob",
+    enabled_by_default: -> { Rails.env.production? }
+  },
+
+  # 14-hour rolling interval using a dynamic lambda
+  complex_schedule: {
+    class: "ComplexScheduleJob",
+    cron: -> (last_ran) {
+      (last_ran.blank? ? Time.now : last_ran + 14.hours).at_beginning_of_minute
+    }
+  }
+}
+```
+
+---
+
+## Zero-downtime deploys and `cron_graceful_restart_period`
+
+When you restart a GoodJob process without zero-downtime overlapping processes, a brief gap exists during which no process is running to enqueue scheduled jobs. Setting `cron_graceful_restart_period` tells the newly started process to look back and re-attempt any missed schedule intervals within that window.
+
+```ruby
+config.good_job.cron_graceful_restart_period = 1.minute
+```
+
+<Note>
+  If you use overlapping (rolling) deploys where the new process starts before the old one
+  stops, GoodJob's unique-index deduplication prevents double-enqueuing, so
+  `cron_graceful_restart_period` is not required — though it remains safe to set.
+</Note>
+
+---
+
+## Dashboard integration
+
+When the GoodJob Dashboard is mounted, the **Cron** section displays all configured recurring tasks with their schedule, last run time, and enabled state. From the Dashboard you can:
+
+- View upcoming run times for each task.
+- Manually trigger an immediate enqueue of any task.
+- Disable a task without modifying code — the enabled state is persisted in the database.
+
+<Tip>
+  Use `enabled_by_default: false` for tasks that should only run on demand or in specific
+  environments, then enable them from the Dashboard as needed.
+</Tip>

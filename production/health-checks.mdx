@@ -1,0 +1,143 @@
+---
+title: "Health check probes for GoodJob worker processes"
+description: "Configure GoodJob's built-in HTTP probe server for liveness and readiness checks. Includes Kubernetes YAML, custom Rack apps, and WEBrick setup."
+---
+
+GoodJob ships with a lightweight HTTP probe server designed for containerised environments. Rather than relying on PID-based process monitoring, the probe server lets your orchestrator — Kubernetes, ECS, Fly.io, or any other platform — confirm that the worker process is alive, started, and connected to the database before routing traffic or deciding whether to restart the container.
+
+## Starting the probe server
+
+Pass `--probe-port` to the CLI to start the probe server alongside the job executor:
+
+```bash
+bundle exec good_job start --probe-port=7001
+```
+
+Or set the port via an environment variable:
+
+```bash
+GOOD_JOB_PROBE_PORT=7001 bundle exec good_job start
+```
+
+## Available endpoints
+
+| Path | Returns 200 when... |
+|---|---|
+| `/` or `/status` | The CLI process is running |
+| `/status/started` | The multithreaded job executor has started |
+| `/status/connected` | A database connection is established |
+
+Probe any endpoint with curl:
+
+```bash
+curl localhost:7001/status
+curl localhost:7001/status/started
+curl localhost:7001/status/connected
+```
+
+## Kubernetes configuration
+
+Use `/status/started` for the startup probe (gives the executor time to initialise) and `/status/connected` for the liveness probe (restarts the container if the database connection is lost):
+
+```yaml
+spec:
+  containers:
+    - name: good_job
+      image: my_app:latest
+      env:
+        - name: RAILS_ENV
+          value: production
+        - name: GOOD_JOB_PROBE_PORT
+          value: "7001"
+      command:
+        - good_job
+        - start
+      ports:
+        - name: probe-port
+          containerPort: 7001
+      startupProbe:
+        httpGet:
+          path: "/status/started"
+          port: probe-port
+        failureThreshold: 30
+        periodSeconds: 10
+      livenessProbe:
+        httpGet:
+          path: "/status/connected"
+          port: probe-port
+        failureThreshold: 1
+        periodSeconds: 10
+```
+
+The startup probe allows up to 300 seconds (30 failures × 10 second period) for the executor to start before Kubernetes considers the container failed.
+
+## Custom probe app
+
+You can replace the default probe server with any Rack app or Rack::Builder block. This is useful for adding authentication, exposing Prometheus metrics, or any other custom HTTP behaviour alongside the health endpoints.
+
+```ruby
+# config/initializers/good_job.rb
+
+Rails.application.configure do
+  config.good_job.probe_app = Rack::Builder.new do
+    use Custom::AuthorizationMiddleware
+    use Custom::PrometheusExporter
+
+    # Include the built-in health check middleware
+    use GoodJob::ProbeServer::HealthcheckMiddleware
+
+    # Return 404 for any path not handled above
+    run GoodJob::ProbeServer::NotFoundApp
+  end
+end
+```
+
+<Warning>
+  The default probe server is a simple, single-threaded blocking server. Keep your custom app lightweight — heavy middleware can delay job execution on the same process thread.
+</Warning>
+
+## Using WEBrick for full Rack compliance
+
+The default probe server is not fully Rack-compliant. Some Rack middleware assumes standard Rack fields are present and will raise errors or behave incorrectly with the default server. Switch to WEBrick if your custom app requires full compliance.
+
+<Steps>
+  <Step title="Add WEBrick to your Gemfile">
+    GoodJob does not include WEBrick as a dependency — you must add it yourself:
+
+    ```ruby
+    # Gemfile
+    gem 'webrick'
+    ```
+
+    Then run `bundle install`.
+  </Step>
+
+  <Step title="Configure the probe handler">
+    Set the handler via Rails config, CLI flag, or environment variable:
+
+    <Tabs>
+      <Tab title="Rails config">
+        ```ruby
+        # config/initializers/good_job.rb
+        Rails.application.configure do
+          config.good_job.probe_handler = :webrick
+        end
+        ```
+      </Tab>
+      <Tab title="CLI flag">
+        ```bash
+        bundle exec good_job start --probe-handler=webrick
+        ```
+      </Tab>
+      <Tab title="Environment variable">
+        ```bash
+        GOOD_JOB_PROBE_HANDLER=webrick bundle exec good_job start
+        ```
+      </Tab>
+    </Tabs>
+  </Step>
+</Steps>
+
+<Note>
+  If WEBrick is configured but not installed, GoodJob logs a warning and falls back to the default probe server automatically. No crash occurs.
+</Note>

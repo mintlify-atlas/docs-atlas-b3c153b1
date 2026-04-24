@@ -1,97 +1,87 @@
 ---
-title: "Introduction"
-description: "Welcome to the new home for your documentation"
+title: "GoodJob: Postgres-backed Active Job for Rails"
+description: "GoodJob is a multithreaded, Postgres-based Active Job backend for Ruby on Rails with concurrency controls, cron scheduling, batches, and a built-in web dashboard."
 ---
 
-## Setting up
+GoodJob is a multithreaded, Postgres-based Active Job backend for Ruby on Rails. Designed for maximum compatibility with Rails, Active Job, and Postgres, it delivers reliable job execution with near-zero configuration — no Redis required.
 
-Get your documentation site up and running in minutes.
-
-<Card
-  title="Start here"
-  icon="rocket"
-  href="/quickstart"
-  horizontal
->
-  Follow our three step quickstart guide.
-</Card>
-
-## Make it yours
-
-Design a docs site that looks great and empowers your users.
-
-<Columns cols={2}>
-  <Card
-    title="Edit locally"
-    icon="pen-to-square"
-    href="/development"
-  >
-    Edit your docs locally and preview them in real time.
+<CardGroup cols={2}>
+  <Card title="Installation" icon="download" href="/installation">
+    Add GoodJob to your Rails app in four steps — gem, migration, config, and your first job.
   </Card>
-  <Card
-    title="Customize your site"
-    icon="palette"
-    href="/essentials/settings"
-  >
-    Customize the design and colors of your site to match your brand.
+  <Card title="Configuration" icon="sliders" href="/configuration/options">
+    Explore all configuration options including execution modes, thread pools, and cron.
   </Card>
-    <Card
-    title="Set up navigation"
-    icon="map"
-    href="/essentials/navigation"
-  >
-    Organize your docs to help users find what they need and succeed with your product.
+  <Card title="Concurrency Controls" icon="lock" href="/features/concurrency-controls">
+    Limit concurrent job execution at enqueue or perform time to prevent duplicates and race conditions.
   </Card>
-  <Card
-    title="API documentation"
-    icon="terminal"
-    href="/api-reference/introduction"
-  >
-    Auto-generate API documentation from OpenAPI specifications.
+  <Card title="Web Dashboard" icon="chart-bar" href="/reference/web-dashboard">
+    Monitor jobs, manage cron entries, and inspect executions with the built-in Rails Engine dashboard.
   </Card>
-</Columns>
+</CardGroup>
 
-## Create beautiful pages
+## Why GoodJob?
 
-Everything you need to create world-class documentation.
+GoodJob is designed to be the best Active Job backend for teams who already run Postgres and want simplicity without sacrificing power.
 
-<Columns cols={2}>
-  <Card
-    title="Write with MDX"
-    icon="pen-fancy"
-    href="/essentials/markdown"
-  >
-    Use MDX to style your docs pages.
+<CardGroup cols={2}>
+  <Card title="Built for Rails" icon="gem">
+    Fully adopts Rails threading and code execution guidelines. Works with `schema.rb` — no `structure.sql` required.
   </Card>
-  <Card
-    title="Code samples"
-    icon="code"
-    href="/essentials/code"
-  >
-    Add sample code to demonstrate how to use your product.
+  <Card title="Backed by Postgres" icon="database">
+    Uses Postgres ACID transactions, session-level advisory locks for run-once safety, and LISTEN/NOTIFY for low latency.
   </Card>
-  <Card
-    title="Images"
-    icon="image"
-    href="/essentials/images"
-  >
-    Display images and other media.
+  <Card title="Fully Featured" icon="star">
+    Cron-style scheduled jobs, batches, concurrency and throttling controls, bulk enqueue, and job pausing.
   </Card>
-  <Card
-    title="Reusable snippets"
-    icon="recycle"
-    href="/essentials/reusable-snippets"
-  >
-    Write once and reuse across your docs.
+  <Card title="Flexible Deployment" icon="server">
+    Run within your web process for economy or scale as an independent CLI process across environments.
   </Card>
-</Columns>
+</CardGroup>
 
-## Need inspiration?
+## Get started in minutes
 
-<Card
-  title="See complete examples"
-  icon="stars"
-  href="https://mintlify.com/customers"
->
-  Browse our showcase of exceptional documentation sites.
-</Card>
+<Steps>
+  <Step title="Add the gem">
+    ```bash
+    bundle add good_job
+    ```
+  </Step>
+  <Step title="Run the install generator">
+    ```bash
+    bin/rails g good_job:install
+    bin/rails db:migrate
+    ```
+  </Step>
+  <Step title="Configure the queue adapter">
+    ```ruby config/application.rb
+    config.active_job.queue_adapter = :good_job
+    ```
+  </Step>
+  <Step title="Enqueue your first job">
+    ```ruby
+    YourJob.perform_later
+    ```
+    In production, start the worker process:
+    ```bash
+    bundle exec good_job start
+    ```
+  </Step>
+</Steps>
+
+## Explore the docs
+
+<CardGroup cols={2}>
+  <Card title="Batches" icon="layer-group" href="/features/batches">
+    Track a set of jobs and enqueue a callback when all jobs have finished.
+  </Card>
+  <Card title="Cron Jobs" icon="clock" href="/features/cron-jobs">
+    Schedule recurring jobs using cron syntax or natural language expressions.
+  </Card>
+  <Card title="Production Setup" icon="rocket" href="/production/setup">
+    Best practices for running GoodJob reliably in production.
+  </Card>
+  <Card title="CLI Reference" icon="terminal" href="/reference/cli-start">
+    Complete reference for the `good_job` command-line tool.
+  </Card>
+</CardGroup>

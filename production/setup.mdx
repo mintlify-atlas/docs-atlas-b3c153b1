@@ -1,0 +1,128 @@
+---
+title: "Production setup guide for GoodJob workers"
+description: "Configure GoodJob for production: execution modes, worker processes, Heroku Procfiles, job record cleanup, and recommended monitoring practices."
+---
+
+Running GoodJob in production requires a dedicated worker process separate from your web server. By default, GoodJob uses `:external` execution mode, which means jobs are enqueued to the database by your web process and executed by a separate `good_job` CLI process. This separation keeps your web server responsive and gives you independent control over worker scaling.
+
+## Execution mode
+
+GoodJob defaults to `:external` mode in production. You set the queue adapter in your environment config and then run the CLI separately:
+
+```ruby
+# config/environments/production.rb
+config.active_job.queue_adapter = :good_job
+```
+
+Start the worker process with:
+
+```bash
+bundle exec good_job start
+```
+
+## Running on Heroku
+
+Add a `worker` entry to your `Procfile` so Heroku manages the worker dyno independently from your web dyno:
+
+```procfile
+web: bundle exec puma -C config/puma.rb
+worker: bundle exec good_job start
+```
+
+You can scale them independently:
+
+```bash
+heroku ps:scale web=2 worker=1
+```
+
+## Key production considerations
+
+GoodJob is reliable by design, but a few practices make it easier to operate confidently.
+
+<Steps>
+  <Step title="Set up an exception notifier">
+    Assign `GoodJob.on_thread_error` so unhandled exceptions from jobs are reported to your error monitoring service (Sentry, Bugsnag, Honeybadger, etc.):
+
+    ```ruby
+    # config/initializers/good_job.rb
+    GoodJob.on_thread_error = -> (exception) { Rails.error.report(exception) }
+    ```
+  </Step>
+
+  <Step title="Enable health check probes">
+    Start the built-in HTTP probe server so your process manager or orchestrator can verify the worker is alive and connected to the database:
+
+    ```bash
+    bundle exec good_job start --probe-port=7001
+    ```
+
+    See the [health checks](/production/health-checks) page for endpoint details and a Kubernetes example.
+  </Step>
+
+  <Step title="Monitor queue depth">
+    A persistently growing number of unscheduled jobs signals that workers cannot keep up. Use Rails instrumentation hooks or your APM tool to track queue depth over time.
+
+    <Tip>Performance monitoring services that support Rails' built-in instrumentation (Sentry, Skylight, etc.) can surface GoodJob metrics without additional setup.</Tip>
+  </Step>
+
+  <Step title="Configure database connection pool">
+    Worker processes need their own database connections. Set your pool size to cover all job threads plus GoodJob's internal utility connections:
+
+    ```yaml
+    # config/database.yml (worker process)
+    pool: <%= 1 + 2 + ENV.fetch("GOOD_JOB_MAX_THREADS", 5).to_i %>
+    ```
+
+    The formula is: 1 listener connection + 2 utility connections + one connection per job thread.
+  </Step>
+</Steps>
+
+## Preserving and cleaning up job records
+
+By default, GoodJob keeps finished job records for 14 days so you can inspect them in the dashboard. You can tune this behaviour with a few settings.
+
+### Changing the retention policy
+
+```ruby
+# config/initializers/good_job.rb
+
+# Delete records immediately after a job finishes (no dashboard history)
+config.good_job.preserve_job_records = false
+
+# Keep only jobs that were discarded (useful for investigating failures)
+config.good_job.preserve_job_records = ->(active_job, exception, error_event) { error_event == :discarded }
+```
+
+### Configuring the cleanup schedule
+
+```ruby
+# config/initializers/good_job.rb
+config.good_job.cleanup_preserved_jobs_before_seconds_ago = 14.days  # default
+config.good_job.cleanup_interval_jobs    = 1_000      # sweep every N executed jobs
+config.good_job.cleanup_interval_seconds = 10.minutes # sweep every N seconds
+```
+
+### Triggering cleanup manually
+
+Run cleanup on demand from a Rake task or the CLI:
+
+```ruby
+# In a Rake task or console
+GoodJob.cleanup_preserved_jobs                      # uses configured retention period
+GoodJob.cleanup_preserved_jobs(older_than: 7.days)  # custom retention period
+```
+
+```bash
+bundle exec good_job cleanup_preserved_jobs --before-seconds-ago=86400
+```
+
+## Recommended monitoring approach
+
+<Note>
+  These four practices together give you visibility into both individual job failures and overall queue health.
+</Note>
+
+- **Exception notifier callback** — use `GoodJob.on_thread_error` to receive alerts on unhandled errors.
+- **HTTP health probes** — prefer probe-based health checks over PID-based monitoring when running in a container or managed platform.
+- **Queue depth tracking** — alert when the number of unscheduled jobs grows abnormally; this is a leading indicator of an under-resourced worker fleet.
+- **APM integration** — GoodJob emits `ActiveSupport::Notifications` events, which Rails-compatible APM tools pick up automatically.

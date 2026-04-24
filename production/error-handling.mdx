@@ -1,0 +1,157 @@
+---
+title: "Error handling and retries in GoodJob jobs"
+description: "Handle exceptions with retry_on, discard_on, on_thread_error, and interrupt errors. Configure graceful shutdown and ActionMailer retry behaviour."
+---
+
+GoodJob guarantees that a successfully completed job runs exactly once. When something goes wrong, the framework gives you several layers to intercept, log, and recover from errors — from Active Job's built-in retry machinery to GoodJob-specific hooks for unhandled exceptions and process interrupts.
+
+## Active Job exception handling
+
+Active Job's `retry_on`, `discard_on`, and `rescue_from` all execute **before** an exception reaches GoodJob. Use them as your first line of defence.
+
+### Retrying with polynomial backoff
+
+```ruby
+class ApplicationJob < ActiveJob::Base
+  retry_on StandardError, wait: :polynomially_longer, attempts: Float::INFINITY
+end
+```
+
+When using infinite retries, exceptions never reach GoodJob, so `GoodJob.on_thread_error` is never called. If you still need to report errors to an external service, add an explicit wrapper:
+
+```ruby
+class ApplicationJob < ActiveJob::Base
+  retry_on StandardError, wait: :polynomially_longer, attempts: Float::INFINITY
+
+  retry_on SpecialError, attempts: 5 do |_job, exception|
+    Rails.error.report(exception)
+  end
+
+  around_perform do |_job, block|
+    block.call
+  rescue StandardError => e
+    Rails.error.report(e)
+    raise
+  end
+end
+```
+
+### Handling the final retry attempt
+
+When `retry_on` is configured with a **limited** number of attempts, the last exception is re-raised and reaches GoodJob. Pass a block to swallow it instead:
+
+```ruby
+class ApplicationJob < ActiveJob::Base
+  retry_on StandardError, attempts: 5 do |_job, _exception|
+    # Log, notify, or do nothing — the job will not be retried again
+  end
+end
+```
+
+## Catching unhandled exceptions with `GoodJob.on_thread_error`
+
+If an exception escapes Active Job's retry/discard handlers and reaches GoodJob, assign a callable to `GoodJob.on_thread_error` to capture it:
+
+```ruby
+# config/initializers/good_job.rb
+GoodJob.on_thread_error = -> (exception) { Rails.error.report(exception) }
+```
+
+This works with any exception monitoring service — Sentry, Bugsnag, Airbrake, Honeybadger, and others.
+
+## `GoodJob.retry_on_unhandled_error`
+
+By default, GoodJob does **not** retry jobs whose exceptions are unhandled. Setting this to `true` causes GoodJob to retry the failing job immediately and infinitely, which can spike database load:
+
+<Warning>
+  `GoodJob.retry_on_unhandled_error = true` retries immediately with no backoff. Use Active Job's `retry_on` with backoff instead.
+</Warning>
+
+```ruby
+# config/initializers/good_job.rb
+GoodJob.retry_on_unhandled_error = false # default; recommended
+```
+
+## ActionMailer retries
+
+`ActionMailer::MailDeliveryJob` inherits directly from `ActiveJob::Base`, not from your `ApplicationJob`. Any configuration on `ApplicationJob` must be duplicated:
+
+```ruby
+# config/initializers/good_job.rb
+ActionMailer::MailDeliveryJob.retry_on StandardError,
+  wait: :polynomially_longer,
+  attempts: Float::INFINITY
+
+ActionMailer::MailDeliveryJob.around_perform do |_job, block|
+  block.call
+rescue StandardError => e
+  Rails.error.report(e)
+  raise
+end
+```
+
+<Note>
+  `ActionMailer::MailDeliveryJob` is the default since Rails 6.0. If your app predates this, verify it is not still using the deprecated `ActionMailer::DeliveryJob`.
+</Note>
+
+## Interrupts, graceful shutdown, and SIGKILL
+
+When GoodJob receives SIGINT, SIGTERM, or an explicit `GoodJob.shutdown` call, it begins a graceful shutdown: it waits for in-flight jobs to finish before exiting, up to the configured `shutdown_timeout`.
+
+### Detecting shutdown from within a job
+
+Poll `GoodJob.current_thread_shutting_down?` (or its inverse `GoodJob.current_thread_running?`) to exit long loops early:
+
+```ruby
+def perform(lots_of_records)
+  lots_of_records.each do |record|
+    break if GoodJob.current_thread_shutting_down?
+    # process record...
+  end
+end
+```
+
+<Note>
+  In `:inline` execution mode, `GoodJob.current_thread_running?` always returns `true` and `GoodJob.current_thread_shutting_down?` always returns `false`.
+</Note>
+
+### SIGKILL and interrupted jobs
+
+If a process is killed hard (SIGKILL, power failure, or OOM), GoodJob automatically re-enqueues interrupted jobs. The interrupted execution record shows `GoodJob::InterruptedError` so you can distinguish it from ordinary errors.
+
+### Controlling interrupt-caused retries with `InterruptErrors`
+
+Include `GoodJob::ActiveJobExtensions::InterruptErrors` to receive a `GoodJob::InterruptError` exception when an interrupted job is retried. This lets you use standard Active Job controls:
+
+```ruby
+class MyJob < ApplicationJob
+  # Must be included before other extensions
+  include GoodJob::ActiveJobExtensions::InterruptErrors
+
+  # Discard rather than retry when interrupted
+  discard_on GoodJob::InterruptError
+
+  # Or retry immediately, unlimited times
+  retry_on GoodJob::InterruptError, wait: 0, attempts: Float::INFINITY
+end
+```
+
+The two error classes serve different roles:
+
+| Class | When it appears | Rescuable? |
+|---|---|---|
+| `GoodJob::InterruptedError` | Written to the execution record of the killed run | No |
+| `GoodJob::InterruptError` | Raised inside the job when it is retried after an interrupt | Yes, via `retry_on` / `discard_on` |
+
+## Graceful shutdown timeout
+
+Configure how long GoodJob waits for in-flight jobs before forcing an exit:
+
+```ruby
+# config/initializers/good_job.rb
+config.good_job.shutdown_timeout = 25 # seconds; set below your platform's SIGKILL grace period
+```
+
+<Tip>
+  On Heroku, the platform sends SIGTERM and then SIGKILL after 30 seconds. Set `shutdown_timeout` to 25 seconds to give jobs time to finish and GoodJob time to clean up.
+</Tip>

@@ -1,0 +1,122 @@
+---
+title: "Job Labels: Attach Searchable Metadata to Jobs"
+description: "Use GoodJob labels to tag jobs with searchable metadata, scope concurrency rules, and replace functional queue names with a single shared queue."
+---
+
+Labels are the recommended way to attach metadata or context to individual jobs. Rather than creating a separate queue for every logical grouping of work, you can tag jobs with one or more string labels and use those labels for searching in the dashboard, scoping concurrency controls, and pausing execution.
+
+## Setup
+
+Include `GoodJob::ActiveJobExtensions::Labels` in your base job class to make the label API available across all jobs.
+
+```ruby
+class ApplicationJob < ActiveJob::Base
+  include GoodJob::ActiveJobExtensions::Labels
+end
+```
+
+## Setting labels
+
+### Class-level defaults
+
+Use `self.good_job_labels` to attach one or more labels to every instance of a job class. These labels are set automatically when the job is instantiated.
+
+```ruby
+class WelcomeEmailJob < ApplicationJob
+  self.good_job_labels = ["email", "onboarding"]
+
+  def perform(user_id)
+    # ...
+  end
+end
+```
+
+### Per-enqueue labels
+
+Override or replace labels for a specific enqueue using `.set(good_job_labels:)`. These labels replace the class-level defaults for that particular job instance.
+
+```ruby
+# Enqueue with custom labels for this specific job
+WelcomeEmailJob.set(good_job_labels: ["email", "vip"]).perform_later(user.id)
+```
+
+### Inspecting labels inside a job
+
+The `good_job_labels` instance method is available inside `perform`. Use it to branch on the labels a job was enqueued with.
+
+```ruby
+class WelcomeEmailJob < ApplicationJob
+  self.good_job_labels = ["email"]
+
+  def perform(user_id)
+    puts good_job_labels
+    # => ["email"]
+  end
+end
+```
+
+## Using labels for concurrency scoping
+
+Labels are the recommended way to scope concurrency rules with `GoodJob::ActiveJobExtensions::Concurrency`. The `good_job_concurrency_rule` API accepts a `label:` parameter that scopes a limit to jobs sharing a given label — you can use a dynamic lambda to derive the label from job arguments.
+
+```ruby
+class ApiRequestJob < ApplicationJob
+  include GoodJob::ActiveJobExtensions::Labels
+  include GoodJob::ActiveJobExtensions::Concurrency
+
+  # Limit to 3 concurrent executions per API endpoint label
+  good_job_concurrency_rule(
+    label: -> { arguments.first },
+    perform_limit: 3
+  )
+
+  def perform(endpoint)
+    # ...
+  end
+end
+
+# Enqueue with a matching label so the rule applies
+ApiRequestJob.set(good_job_labels: ["stripe"]).perform_later("stripe")
+```
+
+In the example above, only three `ApiRequestJob` instances sharing the `"stripe"` label can execute concurrently. Jobs without a matching label are unaffected.
+
+## Replacing functional queue names with labels
+
+A common pattern is to use a single queue for all jobs while using labels to represent the logical grouping that would otherwise be encoded in the queue name.
+
+<CodeGroup>
+
+```ruby Before (queue-per-concern)
+class EmailJob < ApplicationJob
+  queue_as :email
+end
+
+class SmsJob < ApplicationJob
+  queue_as :sms
+end
+```
+
+```ruby After (labels)
+class EmailJob < ApplicationJob
+  queue_as :default
+  self.good_job_labels = ["email"]
+end
+
+class SmsJob < ApplicationJob
+  queue_as :default
+  self.good_job_labels = ["sms"]
+end
+```
+
+</CodeGroup>
+
+This consolidates worker configuration — a single pool serves all jobs — while preserving the ability to search, filter, and pause by label.
+
+## Searching by label in the dashboard
+
+The GoodJob web dashboard's Jobs view supports filtering by label. Enter the label value in the search field to display only jobs with that label. This is useful for investigating failures or tracking the status of a specific category of work without needing separate queues.
+
+<Tip>
+Choose label names that are stable and machine-readable (lowercase, no spaces) so they remain easy to filter on in the dashboard and in Ruby code.
+</Tip>

@@ -1,0 +1,123 @@
+---
+title: "GoodJob installation: gem, migration, and adapter setup"
+description: "Add GoodJob to your Rails application in four steps: install the gem, run the migration, configure the queue adapter, and enqueue your first job."
+---
+
+GoodJob integrates into a Rails application through the standard Active Job interface. The setup process takes a few minutes: add the gem, create the database tables GoodJob needs, point Rails at the adapter, and start executing jobs.
+
+<Steps>
+  <Step title="Add the gem">
+    Add `good_job` to your application's Gemfile and install it:
+
+    ```bash
+    bundle add good_job
+    ```
+  </Step>
+
+  <Step title="Run the install generator">
+    Generate the database migration that creates GoodJob's job records table:
+
+    ```bash
+    bin/rails g good_job:install
+    ```
+
+    Then run the migration:
+
+    ```bash
+    bin/rails db:migrate
+    ```
+
+    <Note>
+      If your application uses Rails' multiple databases with the `migrations_paths` configuration option, pass the `--database` flag to target the correct database:
+
+      ```bash
+      bin/rails g good_job:install --database animals
+      bin/rails db:migrate:animals
+      ```
+    </Note>
+  </Step>
+
+  <Step title="Configure the queue adapter">
+    Set GoodJob as the Active Job adapter in your application configuration:
+
+    ```ruby config/application.rb
+    # config/application.rb or config/environments/{RAILS_ENV}.rb
+    config.active_job.queue_adapter = :good_job
+    ```
+
+    You can set this globally in `config/application.rb` or per environment in the corresponding `config/environments/` file.
+  </Step>
+
+  <Step title="Enqueue your first job">
+    GoodJob supports all standard Active Job features. Enqueue a job with `perform_later`:
+
+    ```ruby
+    YourJob.perform_later
+    ```
+
+    You can also pass queues, delays, and priorities using Active Job's `set` method:
+
+    ```ruby
+    YourJob.set(queue: :some_queue, wait: 5.minutes, priority: 10).perform_later
+    ```
+  </Step>
+</Steps>
+
+## Behavior by environment
+
+GoodJob adapts its execution mode automatically based on the Rails environment. You can override this behavior through configuration, but the defaults are designed to be safe and useful out of the box.
+
+### Development
+
+In the development environment, GoodJob executes jobs `async` in a background thread pool inside the `rails server` process. You do not need a separate worker process during development.
+
+<Note>
+  Because of Rails' deferred autoloading, jobs enqueued via the `rails console` may not begin executing until the Rails application is fully initialized by loading a web page once. To force early initialization so that pre-existing jobs run immediately on boot, add the following to an initializer:
+
+  ```ruby config/initializers/good_job.rb
+  Rails.configuration.after_initialize do
+    ActiveJob::Base && ActiveRecord::Base
+  end
+  ```
+</Note>
+
+<Tip>
+  Only `perform_later` sends jobs to the queue adapter. `perform_now` executes the job immediately in the current thread and does not involve GoodJob at all.
+</Tip>
+
+### Test
+
+In the test environment, GoodJob executes jobs `inline` — immediately in the current thread — so tests run synchronously by default.
+
+Future-scheduled jobs can be executed using `GoodJob.perform_inline` combined with a time-travel tool like Timecop or `ActiveSupport::Testing::TimeHelpers`.
+
+<Warning>
+  Active Job's `TestAdapter`, which powers test helpers like `assert_enqueued_with`, may override GoodJob's adapter in some configurations. See [Rails issue #37270](https://github.com/rails/rails/issues/37270) for details.
+</Warning>
+
+### Production
+
+In the production environment, GoodJob's adapter enqueues jobs in `external` mode. Jobs are persisted to Postgres and executed by a separate GoodJob worker process.
+
+Start the worker using the GoodJob CLI:
+
+```bash
+bundle exec good_job start
+```
+
+Run the worker on a separate machine or container from your web process. For example, with a `Procfile`:
+
+```text Procfile
+web: rails server
+worker: bundle exec good_job start
+```
+
+<Tip>
+  For low-traffic applications where running a second process is not cost-effective, you can run jobs inside the web server process instead:
+
+  ```bash
+  GOOD_JOB_EXECUTION_MODE=async rails server
+  ```
+
+  See the [execution modes configuration](/configuration/execution-modes) page for the additional settings this requires.
+</Tip>

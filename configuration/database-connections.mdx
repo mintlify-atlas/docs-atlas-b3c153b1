@@ -1,0 +1,148 @@
+---
+title: "Postgres Connection Pool Sizing for GoodJob Workers"
+description: "Calculate the right database connection pool size for GoodJob's inline, async, and external modes with formulas and config examples."
+---
+
+GoodJob uses multiple database connections per worker process: one per job-execution thread, plus a small number of additional connections for internal infrastructure like LISTEN/NOTIFY and cron scheduling. If your connection pool is too small, GoodJob will raise `ActiveRecord::ConnectionTimeoutError` at runtime — it will not crash, but jobs will be delayed until a connection becomes available. Sizing the pool correctly up front prevents this and avoids surprise errors in production.
+
+## Why GoodJob needs extra connections
+
+Every GoodJob worker process requires connections for three distinct purposes:
+
+1. **Job execution threads** — each thread needs its own connection to read job records and execute application database queries.
+2. **LISTEN/NOTIFY listener** — a dedicated connection that subscribes to Postgres `NOTIFY` events for real-time job delivery.
+3. **Utility executor** — additional connections for the cron manager, cleanup tasks, and other internal scheduler work (approximately 2 connections).
+
+The executor process will **not crash** if the pool is exhausted, but it will log `ActiveRecord::ConnectionTimeoutError` and jobs will back up until a connection is freed.
+
+---
+
+## Pool size by execution mode
+
+<Tabs>
+  <Tab title=":inline (test)">
+    In `:inline` mode, jobs run synchronously in the calling thread and do not spin up background workers. The Rails default pool size is sufficient.
+
+    ```yaml config/database.yml
+    default: &default
+      adapter: postgresql
+      pool: <%= ENV.fetch("RAILS_MAX_THREADS") { 5 } %>
+    ```
+
+    No additional connections are needed because GoodJob does not start a listener or cron manager in inline mode.
+  </Tab>
+  <Tab title=":async (development)">
+    In `:async` mode, GoodJob runs job threads **inside** the web server process alongside Puma's request-handling threads. You need pool capacity for all of them plus GoodJob's infrastructure:
+
+    | Contributor | Connections |
+    |---|---|
+    | Web server (Puma) threads | `RAILS_MAX_THREADS` |
+    | LISTEN/NOTIFY listener | 1 |
+    | Cron / utility executor | 2 |
+    | GoodJob job threads | `GOOD_JOB_MAX_THREADS` |
+
+    ```yaml config/database.yml
+    default: &default
+      adapter: postgresql
+      pool: >-
+        <%= ENV.fetch("RAILS_MAX_THREADS", 5).to_i
+            + 1
+            + 2
+            + ENV.fetch("GOOD_JOB_MAX_THREADS", 5).to_i %>
+    ```
+
+    <Tip>
+      With default env vars (`RAILS_MAX_THREADS=5`, `GOOD_JOB_MAX_THREADS=5`), this evaluates to **13** connections per process.
+    </Tip>
+
+    If you use Puma in **clustered mode** (multiple worker processes), multiply the above by the number of Puma workers — each worker runs its own GoodJob threads.
+  </Tab>
+  <Tab title=":external (production)">
+    In `:external` mode, the web server and the GoodJob worker are **separate processes** with separate connection pools. Configure each independently.
+
+    **Web server** (`config/database.yml` used by Puma):
+
+    ```yaml config/database.yml
+    default: &default
+      adapter: postgresql
+      pool: <%= ENV.fetch("RAILS_MAX_THREADS", 5) %>
+    ```
+
+    **GoodJob worker process** (`config/database.yml` used by `good_job start`):
+
+    | Contributor | Connections |
+    |---|---|
+    | LISTEN/NOTIFY listener | 1 |
+    | Cron / utility executor | 2 |
+    | GoodJob job threads | `GOOD_JOB_MAX_THREADS` |
+
+    ```yaml config/database.yml
+    default: &default
+      adapter: postgresql
+      pool: <%= 1 + 2 + ENV.fetch("GOOD_JOB_MAX_THREADS", 5).to_i %>
+    ```
+
+    With `GOOD_JOB_MAX_THREADS=5` this evaluates to **8** connections per worker process.
+
+    <Note>
+      If you run multiple `good_job start` processes (e.g. for different queues), each process needs its own pool of connections. Multiply the formula above by the number of worker processes.
+    </Note>
+  </Tab>
+</Tabs>
+
+---
+
+## Queue-specific thread pools
+
+When you use the `queues` option to create multiple named scheduler pools, calculate threads per pool and sum them:
+
+```
+# --queues=mice:2;elephants:1
+# => 2 threads for "mice", 1 thread for "elephants" = 3 total job threads
+```
+
+```yaml config/database.yml
+# For --queues=mice:2;elephants:1
+pool: <%= 1 + 2 + 3 %>  # listener + utility + job threads
+```
+
+---
+
+## Multithreaded queries inside jobs
+
+If your jobs use Active Record's `load_async` or spawn their own threads that make database queries, add one connection per subthread:
+
+```yaml config/database.yml
+pool: >-
+  <%= 1
+      + 2
+      + ENV.fetch("GOOD_JOB_MAX_THREADS", 5).to_i
+      + NUM_SUBTHREADS_PER_JOB %>
+```
+
+---
+
+## Quick reference formulas
+
+| Mode | Formula |
+|---|---|
+| `:inline` | `RAILS_MAX_THREADS` |
+| `:async` (single Puma worker) | `RAILS_MAX_THREADS + 1 + 2 + GOOD_JOB_MAX_THREADS` |
+| `:async` (N Puma workers) | `(RAILS_MAX_THREADS + 1 + 2 + GOOD_JOB_MAX_THREADS) × N` |
+| `:external` web server | `RAILS_MAX_THREADS` |
+| `:external` worker process | `1 + 2 + GOOD_JOB_MAX_THREADS` |
+
+---
+
+## PgBouncer considerations
+
+GoodJob's LISTEN/NOTIFY feature requires **persistent, direct Postgres connections** — it cannot work through PgBouncer in transaction pooling mode. If you use PgBouncer, you must either:
+
+- Route GoodJob's connections to Postgres directly (bypassing PgBouncer), or
+- Configure PgBouncer in **session pooling** mode for GoodJob connections.
+
+See the [PgBouncer guide](/production/pgbouncer) for detailed setup instructions.
+
+<Warning>
+  Disabling LISTEN/NOTIFY (`config.good_job.enable_listen_notify = false`) forces GoodJob to rely on polling alone, which increases job latency. If you must use transaction pooling, configure `poll_interval` to a low value to compensate.
+</Warning>

@@ -1,0 +1,182 @@
+---
+title: "good_job start — Execute queued jobs"
+description: "Run GoodJob's process to pick up and execute queued Active Jobs from Postgres, with options for queues, threads, polling, and health checks."
+---
+
+The `good_job start` command launches a GoodJob worker process that continuously polls Postgres for queued jobs and executes them. It is the primary entry point for running GoodJob as a standalone process, separate from your Rails web server. Every option can be set either via a CLI flag or a matching environment variable, making it easy to configure in containerized or twelve-factor deployments.
+
+## Basic usage
+
+```bash
+bundle exec good_job start
+```
+
+`start` is also the default command, so omitting the subcommand is equivalent:
+
+```bash
+bundle exec good_job
+```
+
+## Options
+
+<ParamField path="--queues" type="string" default="*">
+  Queues or queue pools to work from. Accepts a queue configuration string. When omitted, all queues (`*`) are processed.
+
+  **Environment variable:** `GOOD_JOB_QUEUES`
+</ParamField>
+
+<ParamField path="--max-threads" type="number" default="5">
+  Default number of threads per pool used to execute jobs concurrently. Increase this value to process more jobs in parallel, but be aware of your database connection limits.
+
+  **Environment variable:** `GOOD_JOB_MAX_THREADS`
+</ParamField>
+
+<ParamField path="--poll-interval" type="number" default="10">
+  Number of seconds between polls for available jobs. Reduce this value for lower latency at the cost of more frequent database queries. When Postgres LISTEN/NOTIFY is enabled (the default), most jobs are picked up immediately without waiting for a poll.
+
+  **Environment variable:** `GOOD_JOB_POLL_INTERVAL`
+</ParamField>
+
+<ParamField path="--max-cache" type="number" default="10000">
+  Maximum number of scheduled (future) jobs to cache in memory. Jobs scheduled beyond this limit are not cached and are discovered only on the next poll.
+
+  **Environment variable:** `GOOD_JOB_MAX_CACHE`
+</ParamField>
+
+<ParamField path="--shutdown-timeout" type="number" default="-1">
+  Number of seconds to wait for in-progress jobs to finish after a shutdown signal is received. The default of `-1` means wait indefinitely. Set a positive integer to force-stop threads after that many seconds.
+
+  **Environment variable:** `GOOD_JOB_SHUTDOWN_TIMEOUT`
+</ParamField>
+
+<ParamField path="--idle-timeout" type="number">
+  Exit the process automatically after this many seconds of inactivity (no jobs performed). Useful in autoscaling environments where you want processes to self-terminate when there is no work. When not set (the default), the process runs until explicitly stopped.
+
+  **Environment variable:** `GOOD_JOB_IDLE_TIMEOUT`
+</ParamField>
+
+<ParamField path="--enable-cron" type="boolean" default="false">
+  Whether to run the cron scheduling process alongside job execution. Enable this on exactly one GoodJob process when using GoodJob's built-in cron support.
+</ParamField>
+
+<ParamField path="--enable-listen-notify" type="boolean" default="true">
+  Whether to use Postgres `LISTEN`/`NOTIFY` to receive immediate job notifications. When enabled, new jobs are picked up as soon as they are enqueued rather than waiting for the next poll cycle. Disable if your Postgres setup does not support pub/sub.
+</ParamField>
+
+<ParamField path="--daemonize" type="boolean" default="false">
+  Run the GoodJob process in the background as a Unix daemon. When daemonized, the process detaches from the terminal and writes its PID to the file specified by `--pidfile`.
+</ParamField>
+
+<ParamField path="--pidfile" type="string" default="tmp/pids/good_job.pid">
+  Path to write the PID file when running as a daemon. The directory must exist before starting.
+
+  **Environment variable:** `GOOD_JOB_PIDFILE`
+</ParamField>
+
+<ParamField path="--probe-port" type="number">
+  Port on which to start an HTTP health check server. When set, GoodJob listens for HTTP requests on this port and returns a response indicating process health. Useful for load balancers and container orchestrators. When not set, no probe server is started.
+
+  **Environment variable:** `GOOD_JOB_PROBE_PORT`
+</ParamField>
+
+<ParamField path="--probe-handler" type="string">
+  HTTP server backend for the probe endpoint. Set to `webrick` to use WEBrick, which is Rack-compliant. When not set, a minimal built-in server is used that is not Rack-compliant.
+
+  **Environment variable:** `GOOD_JOB_PROBE_HANDLER`
+</ParamField>
+
+<ParamField path="--queue-select-limit" type="number">
+  The number of queued jobs to select from the database when polling for work. Lowering this value reduces query load; raising it can improve throughput when many jobs are enqueued simultaneously. When not set, the database default is used.
+
+  **Environment variable:** `GOOD_JOB_QUEUE_SELECT_LIMIT`
+</ParamField>
+
+## Configuring queues
+
+The `--queues` option accepts a flexible configuration string that controls which queues are processed and how many threads each pool uses.
+
+| Syntax | Description |
+|--------|-------------|
+| `*` | All queues (default) |
+| `queue_a,queue_b` | Only `queue_a` and `queue_b` |
+| `*,-low_priority` | All queues except `low_priority` |
+| `default:3;critical:2` | Two isolated pools — 3 threads for `default`, 2 for `critical` |
+| `default,urgent:5` | One pool for `default` and `urgent` using 5 threads |
+
+- **Commas** separate queues within a single pool.
+- **Semicolons** separate isolated execution pools, each with their own thread count.
+- **Colons** set the thread count for a pool (overrides `--max-threads` for that pool).
+- **A leading minus** (`-`) excludes a queue from processing.
+- **A plus modifier** (`+`) can be used to include additional queues.
+
+<CodeGroup>
+
+```bash CLI flag
+bundle exec good_job start --queues="critical:2;default,low:3"
+```
+
+```bash Environment variable
+GOOD_JOB_QUEUES="critical:2;default,low:3" bundle exec good_job start
+```
+
+</CodeGroup>
+
+## Signal handling
+
+The `good_job start` process handles two Unix signals:
+
+- **`INT`** (Ctrl-C) — Initiates a graceful shutdown. GoodJob stops accepting new jobs and waits up to `--shutdown-timeout` seconds for running jobs to finish.
+- **`TERM`** — Same behavior as `INT`. Initiates a graceful shutdown.
+
+<Warning>
+  Sending `SIGKILL` bypasses graceful shutdown entirely and immediately terminates the process, potentially leaving in-progress jobs in an inconsistent state. Use `INT` or `TERM` whenever possible.
+</Warning>
+
+## Usage examples
+
+Start with defaults (all queues, 5 threads):
+
+```bash
+bundle exec good_job start
+```
+
+Process only the `critical` and `default` queues:
+
+```bash
+bundle exec good_job start --queues="critical,default"
+```
+
+Two isolated pools — high throughput for `default`, dedicated thread for `critical`:
+
+```bash
+bundle exec good_job start --queues="default:10;critical:1"
+```
+
+Enable cron, health check probe, and a 30-second shutdown timeout:
+
+```bash
+bundle exec good_job start \
+  --enable-cron \
+  --probe-port=7000 \
+  --shutdown-timeout=30
+```
+
+Run as a background daemon:
+
+```bash
+bundle exec good_job start --daemonize --pidfile=tmp/pids/good_job.pid
+```
+
+Configure entirely via environment variables (common in containerized deployments):
+
+```bash
+GOOD_JOB_QUEUES="default,mailers" \
+GOOD_JOB_MAX_THREADS=10 \
+GOOD_JOB_POLL_INTERVAL=5 \
+GOOD_JOB_SHUTDOWN_TIMEOUT=60 \
+bundle exec good_job start
+```
+
+<Tip>
+  Run `bundle exec good_job help start` to print all options directly from your installed version of GoodJob.
+</Tip>

@@ -1,0 +1,206 @@
+---
+title: "Queue optimization: threads, pools, and latency design"
+description: "Design GoodJob queues using isolated thread pools, latency-based naming, the mice-and-elephants model, and Queue Select Limit for large workloads."
+---
+
+By default, GoodJob creates a single thread pool that picks up jobs from every queue. For most small applications that is fine, but as your workload grows you will need to prevent slow, long-running jobs from blocking fast, time-sensitive ones. GoodJob offers multiple layers of optimization: isolated thread pools within a process, multiple processes for independent scaling, and latency-based queue design that reflects the actual operational requirements of your jobs.
+
+## Isolated thread pools
+
+A single GoodJob process can run multiple isolated thread pools, each serving a different set of queues. Pools are separated by a semicolon (`;`) in the `queues` configuration string.
+
+Each pool uses the syntax `<queues>:<thread_count>`:
+
+| Queue specifier | Meaning |
+|---|---|
+| `queue1,queue2` | Only jobs from these queues |
+| `+queue1,queue2` | Only these queues, processed in the listed order |
+| `*` | All queues |
+| `-queue1,queue2` | All queues *except* these |
+
+### Example: three isolated pools
+
+```bash
+bundle exec good_job \
+  --queues="transactional_messages:2;batch_processing:1;-transactional_messages,batch_processing:2;*" \
+  --max-threads=5
+```
+
+This creates four pools:
+
+- `transactional_messages:2` — up to 2 threads for transactional messages only
+- `batch_processing:1` — 1 thread for batch jobs only
+- `-transactional_messages,batch_processing:2` — up to 2 threads for everything *except* those two queues
+- `*` — up to 5 threads (from `--max-threads`) for any queue, as a catch-all
+
+### Ordered queue processing with `+`
+
+Use the `+` modifier to drain higher-priority queues before picking up lower-priority ones within the same pool:
+
+```bash
+bundle exec good_job --queues="+transactional_messages,batch_processing"
+```
+
+Jobs in `batch_processing` are only executed when there are no waiting jobs in `transactional_messages`.
+
+<Tabs>
+  <Tab title="CLI flags">
+    ```bash
+    bundle exec good_job \
+      --queues="transactional_messages:2;batch_processing:1;*" \
+      --max-threads=5
+    ```
+  </Tab>
+  <Tab title="Environment variables">
+    ```bash
+    GOOD_JOB_QUEUES="transactional_messages:2;batch_processing:1;*"
+    GOOD_JOB_MAX_THREADS=5
+    bundle exec good_job
+    ```
+  </Tab>
+  <Tab title="Rails config">
+    ```ruby
+    # config/environments/production.rb
+    config.good_job.queues = "transactional_messages:2;batch_processing:1;*"
+    config.good_job.max_threads = 5
+    ```
+  </Tab>
+</Tabs>
+
+## Multiple processes
+
+Thread pools share a single machine's CPU and memory. To scale queues independently — on different dyno types, container sizes, or auto-scaling rules — define separate processes.
+
+<CodeGroup>
+  ```procfile Separate process types (Heroku)
+  # Procfile
+  worker:               bundle exec good_job --max-threads=5
+  transactional_worker: bundle exec good_job --queues="transactional_messages" --max-threads=2
+  batch_worker:         bundle exec good_job --queues="batch_processing" --max-threads=1
+  ```
+
+  ```procfile Combined multi-process (single Heroku dyno)
+  # Procfile
+  combined_worker: bundle exec good_job --max-threads=5 & \
+                   bundle exec good_job --queues="transactional_messages" --max-threads=2 & \
+                   bundle exec good_job --queues="batch_processing" --max-threads=1 & \
+                   wait -n
+  ```
+</CodeGroup>
+
+Separate process types let you adjust dyno count and dyno size per queue type. The combined approach saves dynos at the cost of sharing CPU and memory.
+
+## Latency-based queue design
+
+Naming queues after their functional purpose (`mailers`, `sms`, `batch`) makes routing intuitive but hides the information you actually need for capacity planning. A better approach: name queues by their **total latency target**.
+
+### Mice and elephants
+
+Queuing theory calls fast, small jobs **mice** (password reset email, MFA SMS token) and slow, large jobs **elephants** (newsletter to 10,000 recipients, full-table audit scan).
+
+The key insight: once an elephant is executing, no amount of priority configuration can make a mouse go first. Priority only works when there is idle capacity. If all threads are busy running elephants, mice wait — regardless of priority settings. The solution is a dedicated, elephant-free doorway for mice.
+
+### Isolating by total latency
+
+Total latency = queuing latency + execution latency. Name your queues to encode the target:
+
+```ruby
+# Instead of:
+config.good_job.queues = "mailers:1;batch:1;*:2"
+
+# Use latency targets:
+config.good_job.queues = "latency_30s:2; latency_2m,latency_30s:2; *:2"
+```
+
+This configuration:
+
+1. Gives `latency_30s` jobs (mice) a dedicated pool of 2 threads — elephants can never enter this pool.
+2. Gives `latency_2m` jobs a second pool of 2 threads, which also serves `latency_30s` jobs when it has spare capacity.
+3. Catches everything else (including newly introduced queues) in the wildcard pool.
+
+Enqueue your jobs accordingly:
+
+```ruby
+PasswordResetJob.set(queue: "latency_30s").perform_later(user)
+NewsletterJob.set(queue: "latency_2m").perform_later(campaign)
+AuditEveryAccountJob.set(queue: "latency_10m").perform_later
+```
+
+<Tip>
+  Use the wildcard `*` pool as a safety net. Any job enqueued to an undeclared queue will still execute rather than sit forever.
+</Tip>
+
+### Adding more size buckets
+
+Introduce intermediate buckets (badgers, wildebeests) as your workload diversifies:
+
+```ruby
+# Three distinct latency buckets
+config.good_job.queues = "latency_30s:1; latency_2m,latency_30s:1; *:1"
+
+# Simplified with wildcard catch-all
+config.good_job.queues = "latency_30s:1; latency_2m,latency_30s:1; *:1"
+```
+
+<Note>
+  More than 3–5 threads per process starts introducing thread contention. Prefer additional processes over very high thread counts.
+</Note>
+
+## Queue Select Limit for large queues
+
+GoodJob's default advisory locking strategy materializes all executable jobs into a CTE before acquiring a lock. With 100,000+ queued jobs, this query can become expensive.
+
+**Queue Select Limit** caps the number of jobs scanned, which dramatically reduces query cost while still providing enough candidates for all available threads:
+
+<Tabs>
+  <Tab title="CLI flag">
+    ```bash
+    bundle exec good_job --queue-select-limit=1000
+    ```
+  </Tab>
+  <Tab title="Environment variable">
+    ```bash
+    GOOD_JOB_QUEUE_SELECT_LIMIT=1000
+    ```
+  </Tab>
+  <Tab title="Rails config">
+    ```ruby
+    config.good_job.queue_select_limit = 1000
+    ```
+  </Tab>
+</Tabs>
+
+Set the limit to a value comfortably above your total thread count across all pools. `1000` is a reasonable default for most PaaS environments — it far exceeds typical database connection limits while still delivering a performance improvement.
+
+The limit is applied inside the materialized CTE:
+
+```sql
+WITH rows AS MATERIALIZED (
+  SELECT id, active_job_id
+  FROM good_jobs
+  WHERE (scheduled_at <= NOW() OR scheduled_at IS NULL) AND finished_at IS NULL
+  ORDER BY priority DESC NULLS LAST, created_at ASC
+  LIMIT 1000  -- inserted when queue_select_limit is set
+)
+SELECT id FROM rows
+WHERE pg_try_advisory_lock(...)
+LIMIT 1
+```
+
+## Advisory lock hash strategy
+
+Advisory lock keys are derived by hashing the job's `active_job_id` to a 64-bit integer using `md5` by default. You can change the hash function if needed:
+
+```ruby
+# config/initializers/good_job.rb
+GoodJob::AdvisoryLockable.hash_function = "sha256"
+```
+
+| Function | PostgreSQL extension required |
+|---|---|
+| `md5` (default) | None |
+| `hashtext` | None (PostgreSQL internal) |
+| `sha1`, `sha224`, `sha256`, `sha384`, `sha512` | `pgcrypto` |
+| `uuid_v5` | `uuid-ossp` |
+
+`md5` is chosen by default for its wide availability and good bit distribution, not for any cryptographic property.

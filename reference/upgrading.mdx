@@ -1,0 +1,143 @@
+---
+title: "Upgrading GoodJob to a new major version"
+description: "Step-by-step instructions for upgrading GoodJob across major versions, including v1→v2, v2→v3, and v3→v4 migration guides."
+---
+
+GoodJob follows semantic versioning. Minor version upgrades (e.g. v4.1 to v4.2) do not introduce breaking changes but may add new deprecation warnings or database migration warnings. Major version upgrades require deliberate, staged steps to avoid disrupting running jobs.
+
+## Minor version upgrades
+
+Database migrations introduced in minor releases are not required immediately — they become mandatory at the next major version boundary. If you want to apply them as soon as they ship, assert `GoodJob.migrated?` in your test suite so CI catches any gap.
+
+<Steps>
+  <Step title="Generate new migration files">
+    ```bash
+    bin/rails g good_job:update
+    ```
+
+    If your application uses Rails' multiple databases with the `migrations_paths` option, pass the `--database` flag:
+
+    ```bash
+    bin/rails g good_job:update --database animals
+    ```
+  </Step>
+  <Step title="Run the migration locally">
+    ```bash
+    bin/rails db:migrate
+    ```
+  </Step>
+  <Step title="Commit and deploy">
+    Commit the generated migration files and the resulting `db/schema.rb` changes, then deploy and run the migration against your production database before restarting server and worker processes.
+  </Step>
+</Steps>
+
+<Note>
+To assert that all GoodJob migrations have been applied in CI, add the following to your test suite:
+
+```ruby
+raise "GoodJob migrations are not current. Run: rails db:migrate" unless GoodJob.migrated?
+```
+</Note>
+
+## Upgrading v3 to v4
+
+GoodJob v4 separates job records and execution records into distinct tables. Previously, both were stored together in `good_jobs`; v4 stores executions exclusively in `good_job_executions`. All in-flight jobs must already use the newer discrete format before you switch to v4, otherwise those jobs may not run correctly after the upgrade.
+
+<Warning>
+Do not skip the v3.99.x staging step. Upgrading directly from an earlier v3.x release to v4 risks losing in-flight jobs that were stored in the legacy format.
+</Warning>
+
+<Steps>
+  <Step title="Upgrade to v3.99.x">
+    Follow the minor version upgrade process: run `bin/rails g good_job:update`, apply all pending migrations, and resolve any deprecation warnings logged at startup or in your test suite.
+  </Step>
+  <Step title="Verify your data is ready">
+    Confirm that every unfinished job already uses the discrete storage format before proceeding. Run one of the following checks:
+
+    **In a Rails console connected to production:**
+
+    ```ruby
+    GoodJob.v4_ready? # must return true
+    ```
+
+    **Or directly in the database:**
+
+    ```sql
+    SELECT COUNT(*)
+    FROM "good_jobs"
+    WHERE finished_at IS NULL
+      AND is_discrete IS NOT TRUE;
+    ```
+
+    The query must return `0`. If it does not, wait for the remaining legacy-format jobs to finish (or discard them) before continuing.
+  </Step>
+  <Step title="Upgrade to v4.x">
+    Update your `Gemfile` to target v4, run `bundle update good_job`, then follow the standard minor version upgrade process to apply any new migrations.
+  </Step>
+</Steps>
+
+### Notable changes in v4
+
+- **Runtime requirements raised.** Rails 6.1+ is required; Rails 6.0 is no longer supported. CRuby 3.0+ and JRuby 9.4+ are required; CRuby 2.6/2.7 and JRuby 9.3 are no longer supported.
+- **Priority direction reversed.** Smaller numbers now mean higher priority (default: `0`), matching Active Job's own definition of priority. Review any jobs that set explicit priority values.
+- **Job model change.** Jobs are enqueued and executed through `GoodJob::Job` instead of `GoodJob::Execution`. Update any code that references `GoodJob::Execution` directly.
+- **Cleanup configuration.** Setting `config.good_job.cleanup_interval_jobs`, `GOOD_JOB_CLEANUP_INTERVAL_JOBS`, `config.good_job.cleanup_interval_seconds`, or `GOOD_JOB_CLEANUP_INTERVAL_SECONDS` to `nil` or `""` no longer disables cleanup. Use `false` to disable, or `-1` to run a cleanup after every job execution.
+
+---
+
+## Older version guides
+
+<AccordionGroup>
+  <Accordion title="Upgrading v2 to v3">
+    GoodJob v3 is operationally identical to v2. If you are already on `v2.9+`, upgrading is straightforward with no significant behavioral changes required.
+
+    <Steps>
+      <Step title="Upgrade to v2.99.x">
+        Follow the minor version upgrade process: run `bin/rails g good_job:update`, apply all pending migrations, and address any deprecation warnings.
+      </Step>
+      <Step title="Upgrade to v3.x">
+        Update your `Gemfile` to target v3 and run `bundle update good_job`.
+      </Step>
+    </Steps>
+
+    **Notable changes in v3:**
+
+    - Job records are preserved by default and automatically deleted after 14 days.
+    - Failed jobs are discarded by default instead of being immediately retried.
+    - `:inline` execution mode now respects job schedules. Use `GoodJob.perform_inline` to execute jobs in tests.
+    - `GoodJob::Adapter` can no longer be initialized with custom execution options (`queues:`, `max_threads:`, `poll_interval:`).
+    - `GoodJob::ActiveJobJob` is renamed to `GoodJob::Job`.
+    - Rails 5.2 support is removed.
+  </Accordion>
+
+  <Accordion title="Upgrading v1 to v2">
+    GoodJob v2 changes the advisory lock key format, which is incompatible with the v1 format. A staged upgrade through the `v1.99.x` transitional release is required to avoid locking conflicts between old and new workers running simultaneously during a deployment.
+
+    <Warning>
+    Do not upgrade directly from v1.x to v2.x. Skipping the v1.99.x step can cause advisory lock collisions during the deployment window.
+    </Warning>
+
+    <Steps>
+      <Step title="Upgrade to v1.99.x">
+        Follow the minor version upgrade process: run `bin/rails g good_job:update`, apply all database migrations, and address deprecation warnings. `v1.99` uses both the v1 and v2 advisory lock formats simultaneously, making it safe to run alongside either version.
+      </Step>
+      <Step title="Resolve all deprecation warnings">
+        Fix any deprecation warnings surfaced by v1.99 before proceeding. These warn of APIs removed in v2.
+      </Step>
+      <Step title="Upgrade to v2.x">
+        Update your `Gemfile` to target v2, run `bundle update good_job`, and follow the standard minor version upgrade process.
+      </Step>
+    </Steps>
+
+    **Notable changes in v2:**
+
+    - `:async_server` execution mode is renamed to `:async`; the prior `:async` mode is renamed to `:async_all`.
+    - The default development execution mode is now `:async` with polling disabled.
+    - Performing jobs are excluded from `enqueue_limit` counts in `GoodJob::ActiveJobExtensions::Concurrency`.
+    - `GoodJob.on_thread_error` is now triggered for unhandled Active Job exceptions.
+    - `GoodJob.reperform_jobs_on_standard_error` is renamed to `GoodJob.retry_on_unhandled_error`.
+    - `GoodJob::Adapter.shutdown(wait:)` argument is renamed to `GoodJob::Adapter.shutdown(timeout:)`.
+    - Advisory lock key format changes from `good_jobs[ROW_ID]` to `good_jobs-[ACTIVE_JOB_ID]`.
+    - Requires the presence of columns `good_jobs.active_job_id`, `good_jobs.concurrency_key`, and `good_jobs.retried_good_job_id`.
+  </Accordion>
+</AccordionGroup>

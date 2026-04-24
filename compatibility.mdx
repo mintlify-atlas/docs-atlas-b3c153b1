@@ -1,0 +1,54 @@
+---
+title: "GoodJob version compatibility: Rails, Ruby, Postgres"
+description: "GoodJob requires Ruby on Rails 6.1+, Ruby 3.0+ or JRuby 9.4+, and Postgres 10.0+. Learn the rationale behind each supported version floor."
+---
+
+GoodJob is designed to work with modern, actively maintained versions of the Ruby on Rails stack. The version floors below reflect the minimum versions where the features GoodJob depends on are available and stable.
+
+## Supported versions
+
+| Component        | Minimum version     |
+| ---------------- | ------------------- |
+| Ruby on Rails    | 6.1                 |
+| Ruby             | 3.0                 |
+| JRuby            | 9.4                 |
+| Postgres         | 10.0                |
+
+## Ruby on Rails 6.1+
+
+GoodJob requires Rails 6.1 or later. The `activejob`, `activerecord`, and `railties` dependencies are all pinned to `>= 6.1.0` in the gemspec.
+
+Rails 6.1 introduced several Active Job improvements and refined the queue adapter interface that GoodJob relies on. Earlier versions lack the API surface needed for GoodJob's full feature set, including reliable job serialization and the threading execution model.
+
+<Note>
+  GoodJob is tested against current and recent Rails versions. Check the [changelog](https://github.com/bensheldon/good_job/blob/master/CHANGELOG.md) and CI matrix for the exact versions covered in any given release.
+</Note>
+
+## Ruby 3.0+
+
+GoodJob requires Ruby 3.0 or later (`required_ruby_version = ">= 3.0.0"` in the gemspec).
+
+Ruby 3.0 brought the Ractors concurrency model, improved keyword argument handling, and performance improvements to the object allocation model. More practically, Ruby 3.0 is the oldest Ruby release still receiving security patches from the Ruby core team. Running GoodJob on an end-of-life Ruby version is unsupported.
+
+GoodJob uses [Concurrent::Ruby](https://github.com/ruby-concurrency/concurrent-ruby) (`>= 1.3.1`) to implement its thread pool. Concurrent::Ruby's stable thread-pool API requires Ruby 3.0+ for reliable behavior on MRI.
+
+## JRuby 9.4+
+
+GoodJob supports JRuby 9.4 and later. JRuby 9.4 targets Ruby 3.1 compatibility, bringing it within the supported Ruby language version range.
+
+<Note>
+  JRuby's true parallel threading model means GoodJob's thread pool can run jobs in parallel across OS threads without the Global Interpreter Lock (GIL) constraints that apply on MRI. This makes JRuby a viable option for CPU-bound workloads.
+</Note>
+
+## Postgres 10.0+
+
+GoodJob requires Postgres 10.0 or later. This floor exists because GoodJob relies on several Postgres features that became stable or were introduced in version 10:
+
+- **`LISTEN` / `NOTIFY`** — GoodJob uses Postgres pub/sub to receive real-time notifications when new jobs are enqueued, reducing latency compared to polling-based backends. `LISTEN`/`NOTIFY` has been available since Postgres 9, but the reliability improvements and connection handling needed for production use at scale were solidified by version 10.
+- **Logical replication and WAL improvements** — Postgres 10 introduced built-in logical replication, and the WAL improvements in that release improve overall write performance for workloads like job tables that see frequent inserts and updates.
+- **Advisory locks** — GoodJob uses session-level advisory locks to guarantee that each job is executed exactly once, even when multiple workers compete for the same job. Advisory locks have been available since earlier versions, but the consistent behavior across connection poolers and the lock visibility improvements are well-established by Postgres 10.
+- **`schema.rb` compatibility** — Unlike Que, which uses Postgres-native stored functions and requires `structure.sql`, GoodJob is designed to stay within the bounds of what Rails' `schema.rb` can represent. This constraint guides GoodJob's data model choices and is well-supported in Postgres 10+.
+
+<Warning>
+  Running GoodJob on Postgres versions older than 10 is not supported and may produce undefined behavior, particularly around advisory lock semantics and LISTEN/NOTIFY reliability.
+</Warning>

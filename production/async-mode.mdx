@@ -1,0 +1,135 @@
+---
+title: "Running GoodJob in async mode within web process"
+description: "Execute background jobs inside your Rails web process with async mode. Covers Puma and Passenger integration, database pool sizing, and tradeoffs vs external mode."
+---
+
+GoodJob's `:async` execution mode runs job threads inside the same OS process as your web server. This eliminates the cost of a separate worker dyno or process and is the default mode in the Rails development environment. The tradeoff is added complexity around process forking and database connection management — both of which this page covers in detail.
+
+## When to use async mode
+
+| Scenario | Recommendation |
+|---|---|
+| Development / low-traffic staging | `:async` is the default — no extra process needed |
+| Budget-constrained production | `:async` saves a dyno or container slot |
+| High-throughput production | Use `:external` — worker processes scale independently |
+| Process-forking server (Puma workers > 0) | `:async` works but requires additional Puma config (see below) |
+
+## Configuring async mode
+
+<Tabs>
+  <Tab title="Rails config">
+    ```ruby
+    # config/environments/production.rb
+    config.active_job.queue_adapter = :good_job
+
+    config.good_job.execution_mode = :async
+    config.good_job.max_threads    = 4
+    config.good_job.poll_interval  = 30
+    ```
+  </Tab>
+  <Tab title="Environment variables">
+    ```bash
+    GOOD_JOB_EXECUTION_MODE=async
+    GOOD_JOB_MAX_THREADS=4
+    GOOD_JOB_POLL_INTERVAL=30
+    ```
+
+    Then start Rails normally:
+
+    ```bash
+    bin/rails server
+    ```
+  </Tab>
+</Tabs>
+
+## Database connection pool sizing
+
+Async mode runs web threads and job threads in the same process, so both compete for the same database connection pool. Size the pool to cover all of them:
+
+```yaml
+# config/database.yml
+pool: <%= ENV.fetch("RAILS_MAX_THREADS", 5).to_i + 1 + 2 + ENV.fetch("GOOD_JOB_MAX_THREADS", 5).to_i %>
+```
+
+The formula:
+- `RAILS_MAX_THREADS` — one connection per web/Puma thread
+- `1` — GoodJob's LISTEN/NOTIFY listener connection
+- `2` — GoodJob's cron scheduler and executor utility connections
+- `GOOD_JOB_MAX_THREADS` — one connection per job execution thread
+
+## Puma integration
+
+When Puma runs with multiple workers (`WEB_CONCURRENCY > 0`), it forks child processes. GoodJob's thread pools must be stopped before the fork and restarted in each child, otherwise the parent process keeps executing jobs after forking.
+
+```ruby
+# config/puma.rb
+
+if ENV.fetch("WEB_CONCURRENCY", 0).to_i > 0
+  before_fork do
+    GoodJob.shutdown
+  end
+
+  before_worker_boot do
+    GoodJob.restart
+  end
+
+  before_worker_shutdown do
+    GoodJob.shutdown
+  end
+end
+
+MAIN_PID = Process.pid
+at_exit do
+  GoodJob.shutdown if Process.pid == MAIN_PID
+end
+```
+
+<Note>
+  GoodJob is compatible with Puma's `preload_app!` method. The `before_fork` / `before_worker_boot` hooks handle the restart correctly in both preload and non-preload configurations.
+</Note>
+
+## Passenger integration
+
+For Phusion Passenger in smart spawning mode, use the Passenger lifecycle events instead of Puma hooks:
+
+```ruby
+# config/initializers/good_job.rb (or config/application.rb)
+
+if defined? PhusionPassenger
+  PhusionPassenger.on_event :starting_worker_process do |forked|
+    # forked is true in smart spawning mode
+    if forked
+      GoodJob.logger.info { 'Starting Passenger worker process.' }
+      GoodJob.restart
+    end
+  end
+
+  PhusionPassenger.on_event :stopping_worker_process do
+    GoodJob.logger.info { 'Stopping Passenger worker process.' }
+    GoodJob.shutdown
+  end
+end
+
+# Shut down GoodJob in the Passenger preloader process too
+PRELOADER_PID = Process.pid
+at_exit do
+  if Process.pid == PRELOADER_PID
+    GoodJob.logger.info { 'Passenger AppPreloader shutting down.' }
+    GoodJob.shutdown
+  end
+end
+```
+
+<Tip>
+  If you use cron-style scheduled jobs, review your Passenger settings for [`passenger_pool_idle_time`](https://www.phusionpassenger.com/library/config/nginx/reference/#passenger_pool_idle_time) and [`passenger_min_instances`](https://www.phusionpassenger.com/library/config/nginx/reference/#passenger_min_instances). You need at least one process running at all times to trigger scheduled jobs.
+</Tip>
+
+## Async mode vs. external mode
+
+`:async` is convenient but comes with constraints that `:external` mode does not have:
+
+- **Resource contention** — job threads compete with web threads for CPU, memory, and database connections.
+- **Fork safety** — you must wire up lifecycle hooks for every process-forking server you use.
+- **Crash coupling** — a web process crash also kills any in-flight jobs running inside it.
+
+For anything beyond low-to-moderate job throughput, running a dedicated `bundle exec good_job start` process (`:external` mode) gives you independent scaling, cleaner crash boundaries, and simpler configuration.

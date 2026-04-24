@@ -1,0 +1,232 @@
+---
+title: "Web dashboard reference for GoodJob"
+description: "Mount, secure, and customize GoodJob's built-in Rails Engine dashboard: authentication, live polling, view partials, and API-only app setup."
+---
+
+GoodJob ships a built-in web dashboard as a mountable `Rails::Engine`. The dashboard provides real-time visibility into queued, running, finished, and discarded jobs; batch status; cron schedules; and pause controls — all backed by the same Postgres database your jobs use.
+
+## Mounting the engine
+
+Add a single line to your `config/routes.rb` to make the dashboard available:
+
+```ruby
+# config/routes.rb
+Rails.application.routes.draw do
+  mount GoodJob::Engine => "good_job"
+  # ...
+end
+```
+
+This mounts the dashboard at `/good_job`. Change the path string to mount it elsewhere.
+
+<Note>
+  To view finished jobs (succeeded and discarded), GoodJob must be configured to preserve job records. Preservation is on by default (`GoodJob.preserve_job_records = true`).
+</Note>
+
+---
+
+## Authentication
+
+Because jobs can contain sensitive arguments, you should restrict access to the dashboard. GoodJob does not include authentication out of the box — choose one of the patterns below.
+
+<Tabs>
+  <Tab title="Devise">
+    Wrap the mount call in Devise's `authenticate` constraint:
+
+    ```ruby
+    # config/routes.rb
+    authenticate :user, ->(user) { user.admin? } do
+      mount GoodJob::Engine => "good_job"
+    end
+    ```
+  </Tab>
+  <Tab title="HTTP Basic Auth">
+    Add Rack middleware directly to the engine:
+
+    ```ruby
+    # config/initializers/good_job.rb
+    GoodJob::Engine.middleware.use(Rack::Auth::Basic) do |username, password|
+      ActiveSupport::SecurityUtils.secure_compare(
+        Rails.application.credentials.good_job_username, username
+      ) &
+        ActiveSupport::SecurityUtils.secure_compare(
+          Rails.application.credentials.good_job_password, password
+        )
+    end
+    ```
+  </Tab>
+  <Tab title="Custom controller hook">
+    Hook into `GoodJob::ApplicationController` using an `on_load` callback. The block is evaluated in the context of the controller class, so all class-level macros (`before_action`, helper methods, etc.) are available.
+
+    ```ruby
+    # config/initializers/good_job.rb
+    ActiveSupport.on_load(:good_job_application_controller) do
+      # `self` is GoodJob::ApplicationController here
+
+      before_action :require_admin
+
+      private
+
+      def require_admin
+        raise ActionController::RoutingError, "Not Found" unless current_user&.admin?
+      end
+
+      def current_user
+        # resolve current user from session/token
+      end
+    end
+    ```
+  </Tab>
+</Tabs>
+
+---
+
+## API-only Rails applications
+
+API-only Rails apps (`config.api_only = true`) strip out several Rack middleware layers that the GoodJob dashboard needs. Add them back in `config/application.rb`:
+
+```ruby
+# config/application.rb
+module MyApp
+  class Application < Rails::Application
+    config.api_only = true
+
+    # Required for the GoodJob dashboard:
+    config.middleware.use Rack::MethodOverride
+    config.middleware.use ActionDispatch::Flash
+    config.middleware.use ActionDispatch::Cookies
+    config.middleware.use ActionDispatch::Session::CookieStore
+  end
+end
+```
+
+---
+
+## Live polling
+
+The dashboard header includes a **Live Poll** checkbox. Enabling it refreshes the current page automatically every 30 seconds.
+
+You can also set the poll interval explicitly by appending `?poll=<seconds>` to any dashboard URL:
+
+```
+https://example.com/good_job/jobs?poll=10
+```
+
+A value of `0` disables polling. The query parameter persists across page navigations within the dashboard.
+
+---
+
+## Customizable view partials
+
+GoodJob renders several partial templates that you can override by placing files at the matching paths inside your application's `app/views/good_job/` directory. GoodJob checks your app first and falls back to its own templates.
+
+<AccordionGroup>
+  <Accordion title="_custom_head.html.erb">
+    **Path:** `app/views/good_job/_custom_head.html.erb`
+
+    Content rendered at the end of the `<head>` tag on every GoodJob page. Use this to inject custom CSS or JavaScript.
+
+    ```erb
+    <%# app/views/good_job/_custom_head.html.erb %>
+    <link rel="stylesheet" href="/custom-good-job.css">
+    <script src="/custom-good-job.js" defer></script>
+    ```
+  </Accordion>
+  <Accordion title="_custom_job_details.html.erb">
+    **Path:** `app/views/good_job/_custom_job_details.html.erb`
+
+    Content rendered above the argument list on the `good_job/jobs#show` page. The local variable `job` is a `GoodJob::Job` instance.
+
+    ```erb
+    <%# app/views/good_job/_custom_job_details.html.erb %>
+    <% arguments = job.active_job.arguments rescue [] %>
+    <% widgets = arguments.select { |arg| arg.is_a?(Widget) } %>
+    <% if widgets.any? %>
+      <div class="my-4">
+        <h5>Widgets</h5>
+        <ul>
+          <% widgets.each do |widget| %>
+            <li><%= link_to widget.name, main_app.widget_url(widget) %></li>
+          <% end %>
+        </ul>
+      </div>
+    <% end %>
+    ```
+  </Accordion>
+  <Accordion title="_custom_execution_details.html.erb">
+    **Path:** `app/views/good_job/_custom_execution_details.html.erb`
+
+    Content rendered above each execution entry on the `good_job/jobs#show` page. Local variables: `job` (`GoodJob::Job`) and `execution` (`GoodJob::Execution`).
+
+    ```erb
+    <%# app/views/good_job/_custom_execution_details.html.erb %>
+    <div class="py-3">
+      <%= link_to "Logs",
+            main_app.logs_url(
+              filter: { job_id: job.id },
+              start_time: execution.performed_at,
+              end_time: execution.finished_at + 1.minute
+            ) %>
+    </div>
+    ```
+  </Accordion>
+</AccordionGroup>
+
+<Warning>
+  These partials expose internal GoodJob classes (such as `GoodJob::Job` and `GoodJob::Execution`) that are not part of the public API. Test your custom partials after every GoodJob upgrade.
+</Warning>
+
+---
+
+## Cron dashboard
+
+When cron tasks are configured, the dashboard shows a **Cron** section listing each task with its schedule, last run time, and current enabled/disabled state. From the dashboard you can:
+
+- View the cron schedule for each task.
+- Enable or disable individual tasks without a deploy.
+- Trigger a task to run immediately by clicking **Run now**.
+
+Cron entries are defined in your GoodJob configuration:
+
+```ruby
+# config/application.rb or config/initializers/good_job.rb
+config.good_job.cron = {
+  nightly_cleanup: {
+    cron:    "0 2 * * *",
+    class:   "CleanupJob",
+    description: "Purge old records every night at 2 AM"
+  }
+}
+```
+
+---
+
+## Troubleshooting
+
+### Engine not loading (autoloading issues)
+
+Some Rails application configurations fail to autoload the GoodJob engine. Explicitly require it at the top of `config/application.rb`, before Bundler requires Rails groups:
+
+```ruby
+# config/application.rb
+require_relative "boot"
+require "rails/all"
+require "good_job/engine"  # add this line
+
+Bundler.require(*Rails.groups)
+
+module MyApp
+  class Application < Rails::Application
+    # ...
+  end
+end
+```
+
+### Finished jobs not visible
+
+Ensure `GoodJob.preserve_job_records` is not set to `false`. The default is `true`. When preservation is disabled, finished job records are deleted immediately after execution and the dashboard cannot display them.
+
+```ruby
+# config/initializers/good_job.rb
+GoodJob.preserve_job_records = true  # default — no change needed unless overridden
+```

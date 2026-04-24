@@ -1,0 +1,90 @@
+---
+title: "Pausing Jobs by Queue or Job Class in GoodJob"
+description: "Temporarily stop GoodJob from executing jobs on a specific queue or of a specific class without stopping the worker process or losing enqueued jobs."
+---
+
+GoodJob can pause job execution for a specific queue or job class without stopping the worker process. Paused queues and job classes are skipped by worker threads — the jobs remain in the database and resume executing as soon as you unpause. This is useful during incidents, deployments, or maintenance windows when you want to hold back a category of work without losing it.
+
+<Warning>
+Pausing is an opt-in feature. It requires an additional database query on every poll cycle, and the performance impact at scale is not yet fully characterized. Enable it explicitly before use.
+</Warning>
+
+## Enabling pauses
+
+Add the following to your GoodJob configuration:
+
+```ruby
+# config/initializers/good_job.rb
+config.good_job.enable_pauses = true
+```
+
+## Pausing execution
+
+Call `GoodJob.pause` with either a `queue:` or `job_class:` keyword argument to stop execution for that target.
+
+```ruby
+# Pause all jobs on the "default" queue
+GoodJob.pause(queue: "default")
+
+# Pause all jobs of a specific class
+GoodJob.pause(job_class: "ReportJob")
+```
+
+Pauses take effect on the next poll cycle. Jobs that are already executing at the time of the pause will complete normally.
+
+## Checking pause status
+
+<CodeGroup>
+
+```ruby Check a specific queue or class
+# Returns true if the "default" queue is paused
+GoodJob.paused?(queue: "default")
+
+# Returns true if ReportJob is paused
+GoodJob.paused?(job_class: "ReportJob")
+
+# Returns true if anything is paused
+GoodJob.paused?
+```
+
+```ruby List all paused targets
+# Returns a hash of all currently paused targets
+GoodJob.paused
+# => { queues: ["default"], job_classes: ["ReportJob"] }
+```
+
+</CodeGroup>
+
+## Unpausing execution
+
+Call `GoodJob.unpause` with the same argument you used to pause.
+
+```ruby
+# Resume the "default" queue
+GoodJob.unpause(queue: "default")
+
+# Resume ReportJob
+GoodJob.unpause(job_class: "ReportJob")
+```
+
+Workers begin picking up jobs from the unpaused target on their next poll cycle.
+
+## Managing pauses in the dashboard
+
+The **Performance** page in the GoodJob web dashboard provides a UI for pausing and unpausing queues and job classes without writing Ruby code. This is the recommended interface during an incident when you need to act quickly.
+
+<Steps>
+  <Step title="Open the dashboard">
+    Navigate to the GoodJob dashboard in your application (typically mounted at `/good_job`).
+  </Step>
+  <Step title="Go to the Performance page">
+    Click **Performance** in the dashboard navigation.
+  </Step>
+  <Step title="Pause or unpause a target">
+    Find the queue or job class you want to pause and click the **Pause** button. Click **Unpause** to resume.
+  </Step>
+</Steps>
+
+<Note>
+Pauses are stored in the database as `GoodJob::Setting` records. They persist across process restarts and apply to all worker processes connected to the same database.
+</Note>

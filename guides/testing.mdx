@@ -1,0 +1,75 @@
+---
+title: "Testing GoodJob jobs in Rails applications"
+description: "Configure GoodJob's inline test adapter, use GoodJob.perform_inline with time helpers, and assert database migrations are current in CI."
+---
+
+GoodJob ships with a test-friendly inline adapter that makes it straightforward to verify job behavior without running a separate worker process. By default, jobs execute immediately on the current thread when enqueued in the test environment, so your test assertions can run right after `perform_later`.
+
+## Default behavior
+
+When `RAILS_ENV=test`, GoodJob automatically uses its inline adapter. Calling `perform_later` on any job class executes the job synchronously before returning. Any unhandled exception raised inside the job propagates directly to your test, failing it immediately rather than silently swallowing errors.
+
+```ruby
+# No special setup required — this just works in test environment
+MyJob.perform_later(record)
+expect(record.reload.processed).to be true
+```
+
+## Scheduled jobs and `inline_execution_respects_schedule`
+
+In GoodJob 2.x, the inline adapter executes future-scheduled jobs immediately regardless of their scheduled time. GoodJob 3.x changed this: scheduled jobs are enqueued in the database instead of running immediately.
+
+To opt into the GoodJob 3.x behavior now, set the following in your test configuration:
+
+```ruby
+# config/environments/test.rb
+config.good_job.inline_execution_respects_schedule = true
+```
+
+With this enabled, a job enqueued with `set(wait: 10.minutes)` will not run until you explicitly advance time and call `GoodJob.perform_inline`.
+
+## Using `GoodJob.perform_inline` with time helpers
+
+`GoodJob.perform_inline` runs all jobs that are currently due. Combine it with Rails' `travel_to` or `travel` helpers to test time-sensitive scheduling logic in integration tests.
+
+```ruby
+# Enqueue a job scheduled 10 minutes in the future
+MyJob.set(wait: 10.minutes).perform_later
+
+# Travel forward in time and execute due jobs
+travel_to(15.minutes.from_now) { GoodJob.perform_inline }
+
+expect(MyRecord.reload.status).to eq("processed")
+```
+
+<Warning>
+Rails `travel` and `travel_to` helpers do not have millisecond precision. Leave at least **1 second** between the scheduled time and the travel destination to ensure the job is considered due. This precision limitation may change in a future Rails release.
+</Warning>
+
+## Asserting database migrations are current
+
+In CI pipelines, it is useful to assert that all GoodJob migrations have been applied before running tests. Use `GoodJob.migrated?` as a lightweight check:
+
+```ruby
+# spec/support/good_job.rb  (or in a before(:suite) hook)
+raise "GoodJob migrations are not current. Run: rails db:migrate" unless GoodJob.migrated?
+```
+
+This prevents hard-to-diagnose runtime errors caused by a missing `good_jobs` table or column.
+
+## Active Job's built-in `TestAdapter`
+
+If you prefer Active Job's own `TestAdapter` (which queues jobs in memory without executing them), you can switch to it in individual tests:
+
+```ruby
+around do |example|
+  original = ActiveJob::Base.queue_adapter
+  ActiveJob::Base.queue_adapter = :test
+  example.run
+  ActiveJob::Base.queue_adapter = original
+end
+```
+
+<Note>
+When using Active Job's `TestAdapter`, jobs are never executed — use `assert_enqueued_with` and related matchers to check that the correct jobs were enqueued. Use GoodJob's inline adapter (the default) when you need the job body to actually run.
+</Note>

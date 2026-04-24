@@ -1,0 +1,273 @@
+---
+title: "Concurrency Controls: Limit Parallel Job Execution"
+description: "Limit concurrent job execution at enqueue or perform time using GoodJob's label-based rules, throttles, and legacy key-based configuration."
+---
+
+GoodJob extends Active Job with concurrency controls that prevent duplicate, redundant, or race-prone jobs from being enqueued or performed simultaneously. Controls are enforced at two stages: when a job is enqueued and when it begins performing. You can limit by a label attached at enqueue time (the current recommended interface) or by a concurrency key derived from the job itself (the legacy interface).
+
+## Including the module
+
+Add `GoodJob::ActiveJobExtensions::Concurrency` to any job class to unlock concurrency controls.
+
+```ruby
+class MyJob < ApplicationJob
+  include GoodJob::ActiveJobExtensions::Concurrency
+end
+```
+
+---
+
+## Rule-based interface: `good_job_concurrency_rule`
+
+The current interface scopes limits to a **label** — a value you assign when enqueuing a job via `good_job_labels:`. A rule only applies to jobs that carry the matching label. Multiple rules can be defined on the same class; they are evaluated in order and the first exceeded rule short-circuits the rest.
+
+```ruby
+class MyJob < ApplicationJob
+  include GoodJob::ActiveJobExtensions::Concurrency
+
+  good_job_concurrency_rule(
+    label: -> { arguments.first[:user_id] },
+    total_limit: 1
+  )
+
+  def perform(user_id:)
+    # ...
+  end
+end
+```
+
+Jobs must be enqueued with the matching label for the rule to apply:
+
+```ruby
+MyJob.set(good_job_labels: [current_user.id]).perform_later(user_id: current_user.id)
+```
+
+### Rule parameters
+
+<ParamField path="label" type="String | Proc">
+  Scopes this rule to jobs carrying this label. Can be a static `String` or a `Proc`/lambda
+  invoked in the context of the job instance. The rule is ignored for jobs that were not enqueued
+  with this label.
+</ParamField>
+
+<ParamField path="total_limit" type="Integer | Proc">
+  Maximum number of unfinished jobs (enqueued **and** performing) sharing this label. Use this
+  when you need a strict upper bound on all in-flight jobs regardless of their current state.
+</ParamField>
+
+<ParamField path="enqueue_limit" type="Integer | Proc">
+  Maximum number of jobs currently waiting in the queue (not yet performing). Excludes jobs that
+  are actively running. Use alongside `perform_limit` when you want independent caps on each stage.
+</ParamField>
+
+<ParamField path="perform_limit" type="Integer | Proc">
+  Maximum number of jobs that may run simultaneously. Excludes queued-but-not-yet-running jobs.
+</ParamField>
+
+<ParamField path="enqueue_throttle" type="Array">
+  Rate limit on enqueuing: `[count, period]`. Rejects enqueue if more than `count` jobs with
+  this label were created in the trailing `period`. Example: `[10, 1.minute]`.
+</ParamField>
+
+<ParamField path="perform_throttle" type="Array">
+  Rate limit on performing: `[count, period]`. Raises `ThrottleExceededError` (triggering
+  a retry with backoff) if more than `count` executions occurred in the trailing `period`.
+  Example: `[100, 1.hour]`.
+</ParamField>
+
+<Warning>
+  Using `enqueue_limit` and `perform_limit` together does **not** guarantee the combined total
+  stays within their sum. Under high concurrency, race conditions between the two disjoint states
+  can cause the total to exceed expectations. Use `total_limit` when you need a hard cap on all
+  in-flight jobs.
+</Warning>
+
+### Defining multiple rules
+
+Call `good_job_concurrency_rule` more than once to stack rules. Rules are checked in declaration order; the first one exceeded aborts the enqueue or raises immediately.
+
+```ruby
+class MyJob < ApplicationJob
+  include GoodJob::ActiveJobExtensions::Concurrency
+
+  # Per-user limit
+  good_job_concurrency_rule(
+    label: -> { arguments.first[:user_id] },
+    total_limit: 5
+  )
+
+  # Global throughput cap
+  good_job_concurrency_rule(
+    label: "global",
+    perform_throttle: [200, 1.hour]
+  )
+
+  def perform(user_id:)
+    # ...
+  end
+end
+
+# Enqueue with both labels so both rules apply
+MyJob
+  .set(good_job_labels: [current_user.id, "global"])
+  .perform_later(user_id: current_user.id)
+```
+
+---
+
+## How concurrency controls work
+
+GoodJob's concurrency strategy for `perform_limit` is **optimistic retry with incremental backoff**.
+
+<AccordionGroup>
+  <Accordion title="What 'optimistic' means">
+    The implementation assumes that limit collisions are the exception rather than the rule — for
+    example, two users submitting the same job at nearly the same time. If you expect thousands of
+    colliding jobs regularly, manage concurrency by controlling the number of GoodJob threads and
+    processes instead (e.g. `good_job --queues "serial:1;-serial:5"`), and use `perform_limit` as
+    a backstop.
+  </Accordion>
+
+  <Accordion title="How retry and backoff work">
+    When `perform_limit` is exceeded, GoodJob raises
+    `GoodJob::ActiveJobExtensions::Concurrency::ConcurrencyExceededError`. The module registers a
+    `retry_on` handler for this error with `attempts: Float::INFINITY` and a polynomially-longer
+    wait (exponentially longer on Active Job below 7.1). The job is rescheduled automatically —
+    no manual retry logic is required.
+
+    Note that first-in-first-out ordering is **not preserved** when a job is retried with backoff.
+  </Accordion>
+
+  <Accordion title="Enqueue-time enforcement">
+    At enqueue time, GoodJob acquires a PostgreSQL advisory lock keyed to the concurrency key or
+    label, counts matching unfinished jobs, and aborts the enqueue (`throw :abort`) if the limit
+    is exceeded. The job is dropped silently — it is not retried later.
+  </Accordion>
+</AccordionGroup>
+
+<Tip>
+  For enqueue-limit enforcement, aborted jobs are dropped permanently. Inform users when a job
+  is rejected so they can take appropriate action.
+</Tip>
+
+---
+
+## Legacy interface: `good_job_control_concurrency_with`
+
+The original interface scopes limits to a **concurrency key** — a string derived from the job and stored on the job record. It remains fully supported and works without labels.
+
+<Tabs>
+  <Tab title="With a custom key">
+    ```ruby
+    class MyJob < ApplicationJob
+      include GoodJob::ActiveJobExtensions::Concurrency
+
+      good_job_control_concurrency_with(
+        total_limit: 1,
+        key: -> { "#{self.class.name}-#{queue_name}-#{arguments.first}-#{arguments.last[:version]}" }
+      )
+
+      def perform(first_name, version:)
+        # ...
+      end
+    end
+    ```
+  </Tab>
+  <Tab title="With default key (class name)">
+    ```ruby
+    class MyJob < ApplicationJob
+      include GoodJob::ActiveJobExtensions::Concurrency
+
+      good_job_control_concurrency_with(
+        perform_limit: 2,
+        enqueue_throttle: [10, 1.minute]
+      )
+
+      def perform
+        # ...
+      end
+    end
+    ```
+  </Tab>
+</Tabs>
+
+### Legacy parameters
+
+<ParamField path="key" type="String | Proc">
+  A globally unique string used to scope the concurrency check. Defaults to the job class name.
+  Can be a `Proc`/lambda invoked in the context of the job instance, giving access to
+  `arguments`, `queue_name`, and other job attributes.
+
+  Set to `nil` (or `-> { nil }`) in a subclass to disable inherited concurrency controls.
+
+  When using a model instance in the key, use `.id` or `.to_global_id` — plain model objects
+  do not stringify as expected.
+</ParamField>
+
+<ParamField path="total_limit" type="Integer | Proc">
+  Maximum unfinished jobs sharing the concurrency key.
+</ParamField>
+
+<ParamField path="enqueue_limit" type="Integer | Proc">
+  Maximum queued (not performing) jobs sharing the concurrency key.
+</ParamField>
+
+<ParamField path="perform_limit" type="Integer | Proc">
+  Maximum concurrently performing jobs sharing the concurrency key.
+</ParamField>
+
+<ParamField path="enqueue_throttle" type="Array">
+  Rate cap on enqueuing: `[count, period]`.
+</ParamField>
+
+<ParamField path="perform_throttle" type="Array">
+  Rate cap on performing: `[count, period]`.
+</ParamField>
+
+---
+
+## When to use `total_limit` vs separate limits
+
+<Tabs>
+  <Tab title="Use total_limit">
+    Use `total_limit` when you need a hard cap on all in-flight jobs — enqueued plus performing —
+    and you do not need different limits at each stage.
+
+    ```ruby
+    good_job_concurrency_rule(
+      label: -> { arguments.first[:account_id] },
+      total_limit: 1   # at most one unfinished job per account at any time
+    )
+    ```
+  </Tab>
+  <Tab title="Use separate limits">
+    Use `enqueue_limit` and `perform_limit` independently when you want to allow a queue backlog
+    while keeping simultaneous execution low.
+
+    ```ruby
+    good_job_concurrency_rule(
+      label: -> { arguments.first[:user_id] },
+      enqueue_limit: 3,   # up to 3 waiting in the queue
+      perform_limit: 1    # only 1 running at a time
+    )
+    ```
+
+    Remember that the combined in-flight total is not strictly bounded by the sum of these two
+    values under high concurrency.
+  </Tab>
+</Tabs>
+
+---
+
+## Testing
+
+Inspect the computed concurrency key in tests using `good_job_concurrency_key`:
+
+```ruby
+job = MyJob.perform_later("Alice", version: "v1")
+job.good_job_concurrency_key #=> "MyJob-default-Alice-v1"
+```
+
+This works for both the legacy key-based interface and for the label-derived key used internally
+by `good_job_concurrency_rule`. Use it to verify that your `key:` lambda produces the expected
+value across different argument combinations.

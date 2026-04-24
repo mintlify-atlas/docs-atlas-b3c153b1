@@ -1,0 +1,288 @@
+---
+title: "All GoodJob Configuration Options, Types, and Defaults"
+description: "Complete reference for every GoodJob configuration option with types, default values, and environment variable equivalents for Rails."
+---
+
+GoodJob exposes a rich set of configuration options that control how jobs are executed, cleaned up, scheduled, and monitored. You can apply settings via `Rails.application.configure`, an initializer, or environment variables — all three styles are fully supported and can be mixed.
+
+## Where to configure
+
+Configuration can live in any of these files:
+
+<CodeGroup>
+
+```ruby config/initializers/good_job.rb
+Rails.application.configure do
+  config.good_job.execution_mode = :async
+  config.good_job.max_threads = 5
+end
+```
+
+```ruby config/application.rb
+module MyApp
+  class Application < Rails::Application
+    config.good_job.execution_mode = :async
+    config.good_job.max_threads = 5
+  end
+end
+```
+
+```ruby config/environments/production.rb
+Rails.application.configure do
+  config.good_job.execution_mode = :external
+  config.good_job.max_threads = 10
+end
+```
+
+</CodeGroup>
+
+You can also pass all options as a single hash:
+
+```ruby config/initializers/good_job.rb
+Rails.application.configure do
+  config.good_job = {
+    execution_mode: :async,
+    max_threads: 5,
+    poll_interval: 30,
+    shutdown_timeout: 25,
+    preserve_job_records: true,
+    retry_on_unhandled_error: false,
+  }
+end
+```
+
+---
+
+## Execution options
+
+<ParamField path="execution_mode" type="symbol" default=":external (production), :async (development), :inline (test)">
+  Controls how and where jobs are executed. See [Execution modes](/configuration/execution-modes) for a full description of each value. Also configurable via the `GOOD_JOB_EXECUTION_MODE` environment variable.
+
+  Valid values: `:inline`, `:external`, `:async`, `:async_server`, `:async_all`
+</ParamField>
+
+<ParamField path="queues" type="string" default='"*"'>
+  Specifies which queues (or queue pools) to execute jobs from. Accepts a queue string expression. Also configurable via `GOOD_JOB_QUEUES`. See [queue optimization](/production/queue-optimization) for the full syntax.
+
+  ```ruby
+  config.good_job.queues = "default:3;critical:1"
+  ```
+</ParamField>
+
+<ParamField path="max_threads" type="integer" default="5">
+  Maximum number of worker threads per scheduler pool. Falls back to `RAILS_MAX_THREADS` if `GOOD_JOB_MAX_THREADS` is not set. Also configurable via `GOOD_JOB_MAX_THREADS`.
+</ParamField>
+
+<ParamField path="poll_interval" type="integer" default="10 (production), -1 (development)">
+  Seconds between database polls for new jobs when running in async mode. Set to `-1` to disable polling entirely (LISTEN/NOTIFY will still deliver new jobs). Also configurable via `GOOD_JOB_POLL_INTERVAL`.
+
+  <Note>
+    Development defaults to `-1` (disabled) because the server restarts often. LISTEN/NOTIFY is active in both environments, so polling is not required for real-time execution.
+  </Note>
+</ParamField>
+
+<ParamField path="max_cache" type="integer" default="10000">
+  Maximum number of future-scheduled jobs to hold in memory. Each 10,000 cached jobs consumes approximately 20 MB of memory. Also configurable via `GOOD_JOB_MAX_CACHE`.
+</ParamField>
+
+<ParamField path="shutdown_timeout" type="integer" default="-1 (wait forever)">
+  Seconds to wait for in-flight jobs to finish before forcibly stopping threads during shutdown. `-1` means wait indefinitely. Also configurable via `GOOD_JOB_SHUTDOWN_TIMEOUT`.
+</ParamField>
+
+<ParamField path="idle_timeout" type="integer" default="nil (never)">
+  Seconds a worker process can be idle (no jobs run) before it exits automatically. Useful for autoscaling environments. Also configurable via `GOOD_JOB_IDLE_TIMEOUT`.
+</ParamField>
+
+<ParamField path="inline_execution_respects_schedule" type="boolean" default="false">
+  Opt-in to future behavior where inline execution honors `wait_until` scheduled times. Defaults to `false` for backwards compatibility.
+</ParamField>
+
+<ParamField path="enqueue_after_transaction_commit" type="boolean" default="false">
+  When `true`, the adapter delays enqueuing jobs until the enclosing database transaction commits, preventing jobs from running against data that does not yet exist.
+</ParamField>
+
+---
+
+## Job record retention
+
+<ParamField path="preserve_job_records" type="boolean | symbol | lambda" default="true">
+  Controls whether finished job records are kept in the database.
+
+  - `true` — keep all finished records
+  - `false` — destroy records immediately after completion
+  - `:on_unhandled_error` — keep only jobs that raised an unhandled error
+  - Lambda — called with `(active_job, exception, error_event)` and should return a boolean
+
+  ```ruby
+  # Keep only discarded jobs
+  config.good_job.preserve_job_records = ->(active_job, exception, error_event) do
+    error_event == :discarded
+  end
+  ```
+</ParamField>
+
+<ParamField path="retry_on_unhandled_error" type="boolean" default="false">
+  When `true`, jobs that raise `StandardError` are re-queued and retried automatically. This can cause infinite retry loops — use Active Job's `retry_on` instead for controlled retry behaviour.
+
+  <Warning>
+    Enabling this globally may cause jobs to loop infinitely if they consistently raise errors. Prefer using `retry_on` in individual job classes.
+  </Warning>
+</ParamField>
+
+<ParamField path="cleanup_discarded_jobs" type="boolean" default="true">
+  Whether discarded jobs are destroyed when running `GoodJob.cleanup_preserved_jobs` or `good_job cleanup_preserved_jobs`. Also configurable via `GOOD_JOB_CLEANUP_DISCARDED_JOBS`.
+</ParamField>
+
+<ParamField path="cleanup_preserved_jobs_before_seconds_ago" type="integer" default="1209600 (14 days)">
+  Jobs older than this number of seconds are eligible for destruction during cleanup. Also configurable via `GOOD_JOB_CLEANUP_PRESERVED_JOBS_BEFORE_SECONDS_AGO`.
+</ParamField>
+
+<ParamField path="cleanup_interval_jobs" type="integer | false" default="1000">
+  Number of jobs a scheduler will execute before automatically triggering preserved-job cleanup. Set to `false` or `0` to disable automatic cleanup by job count. Also configurable via `GOOD_JOB_CLEANUP_INTERVAL_JOBS`.
+</ParamField>
+
+<ParamField path="cleanup_interval_seconds" type="integer | false" default="600 (10 minutes)">
+  Seconds a scheduler will wait between automatic preserved-job cleanup runs. Set to `false` or `0` to disable automatic cleanup by time. Also configurable via `GOOD_JOB_CLEANUP_INTERVAL_SECONDS`.
+</ParamField>
+
+---
+
+## Cron scheduling
+
+<ParamField path="enable_cron" type="boolean" default="false">
+  Enables the cron process so that recurring jobs are enqueued on schedule. Has no effect if `cron` is empty. Also configurable via `GOOD_JOB_ENABLE_CRON`.
+</ParamField>
+
+<ParamField path="cron" type="hash" default="{}">
+  Hash of recurring job definitions. Each key is a unique cron entry name; each value is a hash with `cron`, `class`, and optional `args` / `set` keys. Also configurable as a JSON string via `GOOD_JOB_CRON`.
+
+  ```ruby
+  config.good_job.cron = {
+    hourly_report: {
+      cron:  "0 * * * *",
+      class: "HourlyReportJob",
+      args:  { notify: true },
+    },
+  }
+  ```
+</ParamField>
+
+<ParamField path="cron_graceful_restart_period" type="ActiveSupport::Duration | integer" default="nil">
+  When restarting the cron process, re-enqueue any jobs that would have fired within this window. Set this to match your expected deploy downtime (for example, `1.minute`).
+</ParamField>
+
+---
+
+## LISTEN/NOTIFY and locking
+
+<ParamField path="enable_listen_notify" type="boolean" default="true">
+  Whether GoodJob uses Postgres `LISTEN/NOTIFY` to receive real-time job notifications. Disabling this forces GoodJob to rely on polling alone. Also configurable via `GOOD_JOB_ENABLE_LISTEN_NOTIFY`.
+</ParamField>
+
+<ParamField path="advisory_lock_heartbeat" type="boolean" default="true (development), false (other)">
+  Enables an advisory-lock heartbeat to detect whether a worker process is still alive. Defaults to `true` in development. Also configurable via `GOOD_JOB_ADVISORY_LOCK_HEARTBEAT`.
+</ParamField>
+
+<ParamField path="lock_strategy" type="symbol" default=":advisory">
+  Strategy used to lock jobs during dequeue. Valid values: `:advisory`, `:skiplocked`, `:hybrid`. Also configurable via `GOOD_JOB_LOCK_STRATEGY`.
+</ParamField>
+
+<ParamField path="queue_select_limit" type="integer" default="nil (unlimited)">
+  Caps the number of rows materialized in the advisory-lock CTE query. Useful when queues contain 100,000+ jobs. Set to a value safely above your total thread count (e.g. `1000`). Also configurable via `GOOD_JOB_QUEUE_SELECT_LIMIT`.
+</ParamField>
+
+<ParamField path="dequeue_query_sort" type="symbol" default=":created_at">
+  Column used to sort jobs when dequeueing. Valid values: `:created_at`, `:scheduled_at`. Configurable via `config.good_job.dequeue_query_sort` only (no environment variable equivalent).
+</ParamField>
+
+---
+
+## Error handling and observability
+
+<ParamField path="on_thread_error" type="proc | lambda" default="nil">
+  Callable invoked whenever an exception reaches GoodJob. Use this to forward errors to services like Sentry or Airbrake.
+
+  ```ruby
+  config.good_job.on_thread_error = ->(exception) { Rails.error.report(exception) }
+  ```
+</ParamField>
+
+<ParamField path="logger" type="Logger" default="Rails.logger">
+  Custom logger instance for GoodJob output.
+
+  ```ruby
+  config.good_job.logger = ActiveSupport::TaggedLogging.new(
+    ActiveSupport::Logger.new("log/good_job.log")
+  )
+  ```
+</ParamField>
+
+<ParamField path="lower_thread_priority" type="boolean" default="nil">
+  When `true`, GoodJob worker threads run at a lower OS thread priority than the web server, reducing contention under load. Also configurable via `GOOD_JOB_LOWER_THREAD_PRIORITY`.
+</ParamField>
+
+---
+
+## Dashboard
+
+<ParamField path="dashboard_default_locale" type="symbol" default=":en">
+  Default locale for the GoodJob web dashboard. Must correspond to a locale supported by GoodJob's built-in translations.
+</ParamField>
+
+<ParamField path="dashboard_live_poll_enabled" type="boolean" default="true">
+  Whether the live-poll button is enabled in the dashboard UI by default.
+</ParamField>
+
+---
+
+## Pausing
+
+<ParamField path="enable_pauses" type="boolean" default="false">
+  Enables the job-pausing feature, allowing specific queues or job classes to be paused without stopping the entire worker. Also configurable via `GOOD_JOB_ENABLE_PAUSES`.
+</ParamField>
+
+---
+
+## Probe server
+
+<ParamField path="probe_handler" type="string" default="nil">
+  HTTP server handler for the probe server. Set to `"webrick"` to use WEBrick instead of GoodJob's simple built-in handler. WEBrick must be in your load path. Also configurable via `GOOD_JOB_PROBE_HANDLER`.
+
+  ```ruby
+  config.good_job.probe_handler = "webrick"
+  ```
+</ParamField>
+
+<ParamField path="probe_app" type="Rack application" default="nil">
+  Custom Rack application mounted on the probe server. When set, replaces the default health-check responses.
+
+  ```ruby
+  config.good_job.probe_app = ->(env) { [200, {}, ["OK"]] }
+  ```
+</ParamField>
+
+---
+
+## Module-level accessors
+
+A subset of options can also be set directly on the `GoodJob` module. These are available for backwards compatibility; prefer `config.good_job.*` in new code.
+
+```ruby config/initializers/good_job.rb
+# Set the ActiveRecord base class for GoodJob models (must be a String)
+GoodJob.active_record_parent_class = "ApplicationRecord"
+
+# Inject custom ActiveRecord configuration (e.g. for multiple databases)
+GoodJob.configure_active_record do
+  connects_to database: { writing: :jobs_database }
+end
+
+# Module-level aliases for the config options above
+GoodJob.logger                  = Rails.logger
+GoodJob.preserve_job_records    = true
+GoodJob.retry_on_unhandled_error = false
+GoodJob.on_thread_error         = ->(exception) { Sentry.capture_exception(exception) }
+```
+
+<Note>
+  `GoodJob.active_record_parent_class` must be a **String** to avoid prematurely initialising Active Record constants during boot.
+</Note>

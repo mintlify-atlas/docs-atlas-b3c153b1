@@ -1,0 +1,128 @@
+---
+title: "PgBouncer compatibility and SKIP LOCKED mode"
+description: "Configure GoodJob to work with PgBouncer transaction mode using SKIP LOCKED locking strategy, polling, and disabled LISTEN/NOTIFY."
+---
+
+By default, GoodJob is not compatible with PgBouncer in **transaction mode**. GoodJob uses two PostgreSQL features that require a persistent session-level connection: advisory locks (to coordinate which worker picks up a given job) and `LISTEN/NOTIFY` (to wake up workers when new jobs arrive). PgBouncer's transaction mode returns connections to the pool after each transaction, which breaks both of these session-level mechanisms.
+
+GoodJob **is** compatible with PgBouncer in **connection mode**, because connection mode maintains a persistent connection per client, preserving session state.
+
+## Compatibility summary
+
+| PgBouncer mode | Compatible? | Notes |
+|---|---|---|
+| Connection mode | Yes | Default GoodJob configuration works |
+| Transaction mode | No (default) | Requires `:skiplocked` strategy + additional config |
+| Transaction mode | Yes (with config) | See [SKIP LOCKED mode](#skip-locked-mode) below |
+
+## SKIP LOCKED mode
+
+GoodJob offers an alternative locking strategy that writes lock state to the `good_jobs` table using `SELECT FOR UPDATE SKIP LOCKED` rather than holding session-level advisory locks. This makes GoodJob safe to use behind PgBouncer in transaction mode.
+
+### Available strategies
+
+| Strategy | Behaviour |
+|---|---|
+| `:advisory` | Default. Uses session-level advisory locks. Not compatible with PgBouncer transaction mode. |
+| `:skiplocked` | Uses `SELECT FOR UPDATE SKIP LOCKED` only. No advisory locks held. Compatible with PgBouncer transaction mode. |
+| `:hybrid` | Uses `SELECT FOR UPDATE SKIP LOCKED` *and* acquires an advisory lock. For rolling deploys where some workers still use `:advisory`. |
+
+All three strategies coexist safely during a rolling deploy — each strategy skips jobs already locked by another worker regardless of which strategy that worker uses.
+
+### Configuring SKIP LOCKED
+
+<Tabs>
+  <Tab title="Rails initializer">
+    ```ruby
+    # config/initializers/good_job.rb
+    GoodJob.configure do |config|
+      config.lock_strategy = :skiplocked
+    end
+    ```
+  </Tab>
+  <Tab title="Environment variable">
+    ```bash
+    GOOD_JOB_LOCK_STRATEGY=skiplocked
+    ```
+  </Tab>
+</Tabs>
+
+## Full PgBouncer transaction mode configuration
+
+`:skiplocked` alone is not enough. `LISTEN/NOTIFY` also requires a persistent connection and must be disabled. Without it, GoodJob relies on polling to detect new jobs.
+
+Configure all four settings together:
+
+<Tabs>
+  <Tab title="Rails initializer">
+    ```ruby
+    # config/initializers/good_job.rb
+    GoodJob.configure do |config|
+      config.lock_strategy           = :skiplocked
+      config.enable_listen_notify    = false
+      config.advisory_lock_heartbeat = false
+      config.poll_interval           = 5  # seconds; tune to your latency tolerance
+    end
+    ```
+  </Tab>
+  <Tab title="Environment variables">
+    ```bash
+    GOOD_JOB_LOCK_STRATEGY=skiplocked
+    GOOD_JOB_ENABLE_LISTEN_NOTIFY=false
+    GOOD_JOB_ADVISORY_LOCK_HEARTBEAT=false
+    GOOD_JOB_POLL_INTERVAL=5
+    ```
+  </Tab>
+</Tabs>
+
+With these four settings, GoodJob holds no session-level state between queries and is safe to run behind PgBouncer in transaction mode.
+
+<Note>
+  Disabling `LISTEN/NOTIFY` means workers discover new jobs by polling instead of being notified immediately. A `poll_interval` of 5 seconds adds up to 5 seconds of additional queuing latency per job. Increase or decrease based on your latency requirements.
+</Note>
+
+## Workaround: Rails multiple databases
+
+If you want the rest of your application to use PgBouncer in transaction mode but cannot or do not want to change GoodJob's locking strategy, you can give GoodJob its own direct database connection that bypasses PgBouncer entirely.
+
+<Steps>
+  <Step title="Define a direct database connection">
+    Add a second connection entry to `config/database.yml` that points directly to PostgreSQL, not through PgBouncer:
+
+    ```yaml
+    # config/database.yml
+    production:
+      primary:
+        url: postgres://pgbouncer_host/my_database
+      primary_direct:
+        url: postgres://database_host/my_database
+    ```
+  </Step>
+
+  <Step title="Create an abstract Active Record base class">
+    Create a base class that uses the direct connection:
+
+    ```ruby
+    # app/models/application_direct_record.rb
+    class ApplicationDirectRecord < ActiveRecord::Base
+      self.abstract_class = true
+      connects_to database: { writing: :primary_direct, reading: :primary_direct }
+    end
+    ```
+  </Step>
+
+  <Step title="Configure GoodJob to use the direct connection">
+    Tell GoodJob to use your new base class instead of `ActiveRecord::Base`:
+
+    ```ruby
+    # config/initializers/good_job.rb
+    GoodJob.active_record_parent_class = "ApplicationDirectRecord"
+    ```
+  </Step>
+</Steps>
+
+With this setup, your application queries flow through PgBouncer in transaction mode while GoodJob maintains its own persistent, session-level connection to PostgreSQL. No locking strategy changes are required.
+
+<Tip>
+  The multiple databases approach is the lower-risk option if you are already using PgBouncer and do not want to change GoodJob's locking behaviour. The `:skiplocked` approach is better if you want GoodJob itself to be fully stateless at the connection level.
+</Tip>

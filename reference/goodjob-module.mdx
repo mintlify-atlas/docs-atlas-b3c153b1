@@ -1,0 +1,392 @@
+---
+title: "GoodJob module API reference"
+description: "Complete reference for the top-level GoodJob module: configuration attributes, lifecycle methods, job control, bulk enqueue, and batch management."
+---
+
+The `GoodJob` module is the top-level namespace for the library and the primary surface for runtime configuration and control. You set configuration attributes here during initialization, and call lifecycle methods from process hooks such as Puma's `on_worker_boot` / `before_fork`. The module also exposes utilities for inline execution, record cleanup, pausing, and bulk operations.
+
+## Configuration attributes
+
+These module-level accessors are typically set in `config/initializers/good_job.rb`.
+
+### `GoodJob.active_record_parent_class=`
+
+Sets the `ActiveRecord::Base` subclass that all GoodJob models inherit from. Use this when you run multiple databases or have a custom base class that configures a specific connection.
+
+```ruby
+# config/initializers/good_job.rb
+GoodJob.active_record_parent_class = "SecondaryApplicationRecord"
+```
+
+<ParamField path="value" type="string">
+  The string name of an `ActiveRecord::Base` subclass. GoodJob constantizes this string at boot time. Defaults to `nil`, which falls back to `ActiveRecord::Base`.
+</ParamField>
+
+### `GoodJob.configure_active_record`
+
+Evaluates a block inside `GoodJob::BaseRecord` via `class_eval`. Use this to call methods like `connects_to` that must be declared inside the class body.
+
+```ruby
+GoodJob.configure_active_record do
+  connects_to database: { writing: :special_database, reading: :special_database }
+end
+```
+
+### `GoodJob.logger=`
+
+Redirects GoodJob's internal log output. Defaults to `Rails.logger` (set by the Railtie). Accepts any Logger-compatible object.
+
+```ruby
+GoodJob.logger = ActiveSupport::TaggedLogging.new(
+  ActiveSupport::Logger.new("log/good_job.log")
+)
+```
+
+<ParamField path="value" type="Logger">
+  A `Logger` instance. `nil` suppresses all log output.
+</ParamField>
+
+### `GoodJob.preserve_job_records=`
+
+Controls whether finished job records are kept in the database. Preservation is enabled by default (`true`) and is required for the web dashboard to display finished jobs.
+
+<ParamField path="value" type="Boolean | Symbol | Proc">
+  - `true` — keep all finished records (default).
+  - `false` — delete records immediately after a job finishes.
+  - `:on_unhandled_error` — keep only records that finished with an unhandled error.
+  - A lambda `(active_job, exception, error_event) -> { ... }` — called after each execution; return `true` to preserve.
+</ParamField>
+
+```ruby
+# Preserve only discarded jobs
+GoodJob.preserve_job_records = ->(active_job, exception, error_event) {
+  error_event == :discarded
+}
+```
+
+<Note>
+  When using GoodJob's cron functionality, job records are always preserved briefly to prevent duplicate scheduling, regardless of this setting.
+</Note>
+
+### `GoodJob.retry_on_unhandled_error=`
+
+When `true`, jobs that raise an error not in `handled_exceptions` are re-queued for a retry instead of being discarded or marked finished. Defaults to `false`.
+
+<ParamField path="value" type="Boolean">
+  `true` re-queues jobs on unhandled errors. `false` (default) marks them finished or discarded.
+</ParamField>
+
+### `GoodJob.handled_exceptions=`
+
+The list of exception classes that GoodJob rescues during job execution. Exceptions outside this list propagate and crash the executing thread. Accepts class objects or strings that are constantized at runtime.
+
+<ParamField path="value" type="Array<Class | String>">
+  Default: `[StandardError, NotImplementedError]`.
+</ParamField>
+
+```ruby
+GoodJob.handled_exceptions = [StandardError, NotImplementedError, ScriptError]
+```
+
+### `GoodJob.on_thread_error=`
+
+A callable invoked whenever an exception reaches GoodJob (after all job-level rescue handling). Use this to forward errors to an exception tracking service.
+
+<ParamField path="value" type="Proc | nil">
+  Receives one argument: the `Exception` instance. Return value is ignored.
+</ParamField>
+
+```ruby
+GoodJob.on_thread_error = ->(exception) { Sentry.capture_exception(exception) }
+```
+
+---
+
+## Lifecycle methods
+
+These methods control the background thread pool. Call them from Puma's process lifecycle hooks when running GoodJob in async mode.
+
+### `GoodJob.shutdown(timeout:)`
+
+Signals all background threads to stop picking up new jobs. Waits for currently executing jobs to finish according to `timeout`.
+
+<ParamField path="timeout" type="Numeric | nil" default="-1">
+  - `nil` — trigger shutdown and return immediately without waiting.
+  - `-1` — wait indefinitely until all threads finish (default).
+  - `0` — stop all threads immediately, abandoning active jobs.
+  - positive number — wait that many seconds, then stop remaining threads.
+</ParamField>
+
+```ruby
+# config/puma.rb
+on_worker_shutdown do
+  GoodJob.shutdown(timeout: 25)
+end
+```
+
+### `GoodJob.shutdown?`
+
+Returns `true` when all background threads are stopped.
+
+<ResponseField name="return" type="Boolean">
+  `true` if all capsule instances are shut down.
+</ResponseField>
+
+### `GoodJob.restart(timeout:)`
+
+Shuts down and restarts all background threads. Call this after forking (e.g., in Puma's `on_worker_boot`) so child processes get their own thread pools.
+
+<ParamField path="timeout" type="Numeric" default="-1">
+  Same semantics as `GoodJob.shutdown(timeout:)`.
+</ParamField>
+
+```ruby
+# config/puma.rb
+before_fork do
+  GoodJob.shutdown
+end
+
+on_worker_boot do
+  GoodJob.restart
+end
+```
+
+<Note>
+  `restart` is a no-op when `execution_mode` is not `:async` and the process is not running inside a web server, so it is safe to call unconditionally.
+</Note>
+
+---
+
+## Thread status helpers
+
+### `GoodJob.current_thread_running?`
+
+Returns `true` when the current thread is actively executing a GoodJob job. Useful for conditionally skipping expensive setup or teardown.
+
+<ResponseField name="return" type="Boolean" />
+
+### `GoodJob.current_thread_shutting_down?`
+
+Returns `true` when the current thread has received a shutdown signal. Use this inside long-running job logic to exit cleanly.
+
+```ruby
+def perform
+  items.each do |item|
+    break if GoodJob.current_thread_shutting_down?
+    process(item)
+  end
+end
+```
+
+<ResponseField name="return" type="Boolean" />
+
+---
+
+## Job execution
+
+### `GoodJob.perform_inline(queue_string, limit:)`
+
+Executes queued jobs synchronously in the current thread. Primarily intended for test environments or scripts. Unhandled errors are re-raised.
+
+<ParamField path="queue_string" type="string" default="*">
+  Queue filter string using GoodJob's queue selector syntax (e.g. `"default"`, `"*"`, `"-low_priority"`).
+</ParamField>
+
+<ParamField path="limit" type="Integer | nil" default="nil">
+  Maximum number of jobs to run. `nil` runs all available jobs.
+</ParamField>
+
+```ruby
+# Run all enqueued jobs inline (e.g. in tests)
+GoodJob.perform_inline
+
+# Run up to 5 jobs from the critical queue
+GoodJob.perform_inline("critical", limit: 5)
+```
+
+---
+
+## Record cleanup
+
+### `GoodJob.cleanup_preserved_jobs(older_than:, in_batches_of:, include_discarded:)`
+
+Deletes old preserved job and batch records from the database. Schedule this as a recurring cron job when `preserve_job_records` is enabled to avoid unbounded table growth.
+
+<ParamField path="older_than" type="Numeric | ActiveSupport::Duration | nil">
+  Delete records finished more than this many seconds ago. Defaults to the `cleanup_preserved_jobs_before_seconds_ago` configuration value (1209600 seconds / 14 days).
+</ParamField>
+
+<ParamField path="in_batches_of" type="Integer" default="1000">
+  Number of records to delete per query loop iteration.
+</ParamField>
+
+<ParamField path="include_discarded" type="Boolean">
+  Whether to also delete discarded (failed) job records. Defaults to the `cleanup_discarded_jobs?` configuration value.
+</ParamField>
+
+<ResponseField name="return" type="Integer">
+  Total number of job execution records and batch records destroyed.
+</ResponseField>
+
+```ruby
+# Via cron task
+GoodJob.cleanup_preserved_jobs(older_than: 7.days, include_discarded: true)
+```
+
+---
+
+## Pausing
+
+You can pause job execution per queue, per job class, or per label — and resume it without a deploy. Pausing is stored in the database, so it survives process restarts.
+
+### `GoodJob.pause(queue:, job_class:)`
+
+Prevents GoodJob from picking up new jobs matching the filter. Already-running jobs are not interrupted.
+
+<ParamField path="queue" type="string | nil">
+  Name of the queue to pause. Pass `nil` to match all queues when combined with `job_class`.
+</ParamField>
+
+<ParamField path="job_class" type="string | nil">
+  Name of the job class to pause (e.g. `"EmailJob"`).
+</ParamField>
+
+### `GoodJob.unpause(queue:, job_class:, label:)`
+
+Resumes job execution for the given queue, job class, or label.
+
+<ParamField path="queue" type="string | nil">Queue name.</ParamField>
+<ParamField path="job_class" type="string | nil">Job class name.</ParamField>
+<ParamField path="label" type="string | nil">Job label.</ParamField>
+
+### `GoodJob.paused?(queue:, job_class:, label:)`
+
+Returns whether execution is currently paused for the given filter.
+
+<ResponseField name="return" type="Boolean" />
+
+### `GoodJob.paused`
+
+Returns a hash listing all currently paused queues, job classes, and labels.
+
+<ResponseField name="return" type="Hash">
+  Keys: `:queues`, `:job_classes`, `:labels` — each an array of strings.
+</ResponseField>
+
+```ruby
+GoodJob.pause(queue: "mailers")
+GoodJob.paused?(queue: "mailers") # => true
+
+GoodJob.paused
+# => { queues: ["mailers"], job_classes: [], labels: [] }
+
+GoodJob.unpause(queue: "mailers")
+```
+
+---
+
+## Bulk enqueue
+
+`GoodJob::Bulk` collects multiple `perform_later` calls and flushes them to the database in a single `INSERT`, reducing round-trips when enqueueing many jobs at once.
+
+### `GoodJob::Bulk.enqueue`
+
+Accepts either a block form or an array of already-instantiated `ActiveJob::Base` objects.
+
+<Tabs>
+  <Tab title="Block form">
+    ```ruby
+    GoodJob::Bulk.enqueue do
+      10.times { |i| MyJob.perform_later(i) }
+      AnotherJob.perform_later("hello")
+    end
+    ```
+    All `perform_later` calls inside the block are buffered and flushed at the end of the block.
+  </Tab>
+  <Tab title="Array form">
+    ```ruby
+    jobs = 10.times.map { |i| MyJob.new(i) }
+    GoodJob::Bulk.enqueue(jobs)
+    ```
+    Pass an array of un-enqueued `ActiveJob::Base` instances. GoodJob inserts them all in one query.
+  </Tab>
+</Tabs>
+
+<Note>
+  Jobs that have an `enqueue_limit` or `total_limit` concurrency rule are enqueued individually (not bulk-inserted) so that the `before_enqueue` concurrency check runs correctly.
+</Note>
+
+<ResponseField name="return" type="Array<ActiveJob::Base>">
+  The ActiveJob instances that were captured. Check `provider_job_id` to confirm a job was actually persisted.
+</ResponseField>
+
+---
+
+## Batch API
+
+`GoodJob::Batch` groups multiple jobs together so that callbacks fire when the whole group finishes. Batches require the GoodJob adapter and preserved job records.
+
+### Creating and enqueueing a batch
+
+```ruby
+batch = GoodJob::Batch.enqueue(
+  on_finish: BatchFinishedJob,
+  on_success: BatchSucceededJob,
+  on_discard: BatchDiscardedJob,
+  description: "Nightly report",
+  some_custom_property: 42
+) do
+  ReportSectionJob.perform_later("revenue")
+  ReportSectionJob.perform_later("costs")
+end
+```
+
+### Key properties
+
+| Property | Type | Description |
+|---|---|---|
+| `on_finish` | `Class` | Job class enqueued when all batch jobs finish (success or discard). |
+| `on_success` | `Class` | Job class enqueued when all batch jobs succeed. |
+| `on_discard` | `Class` | Job class enqueued when any batch job is discarded. |
+| `callback_queue_name` | `String` | Queue for callback jobs. |
+| `callback_priority` | `Integer` | Priority for callback jobs. |
+| `description` | `String` | Free-text label visible in the dashboard. |
+| `properties` | `Hash` | Arbitrary key-value store passed to callback jobs. |
+
+### Key methods
+
+<ResponseField name="enqueued?" type="Boolean">Whether all jobs have been enqueued.</ResponseField>
+<ResponseField name="finished?" type="Boolean">Whether all jobs have finished (succeeded or discarded).</ResponseField>
+<ResponseField name="succeeded?" type="Boolean">Whether all jobs finished without being discarded.</ResponseField>
+<ResponseField name="discarded?" type="Boolean">Whether at least one job was discarded.</ResponseField>
+<ResponseField name="active_jobs" type="Array<ActiveJob::Base>">The live ActiveJob instances in the batch.</ResponseField>
+
+### Accessing the batch from inside a callback job
+
+```ruby
+class BatchFinishedJob < ApplicationJob
+  def perform(batch, params)
+    puts batch.id
+    puts batch.properties[:some_custom_property] # => 42
+    puts batch.succeeded?
+  end
+end
+```
+
+### Bulk-creating batches
+
+`GoodJob::Batch.enqueue_all` inserts multiple batches and their jobs in a fixed number of database queries, rather than one-at-a-time. It accepts an array of `[batch, jobs]` pairs where each batch must be a new, unpersisted `GoodJob::Batch` and each jobs entry is an array of `ActiveJob::Base` instances.
+
+```ruby
+pairs = 5.times.map do |i|
+  batch = GoodJob::Batch.new(description: "Batch #{i}", on_finish: FinishJob)
+  jobs  = [MyJob.new, AnotherJob.new]
+  [batch, jobs]
+end
+
+GoodJob::Batch.enqueue_all(pairs)
+```
+
+<Warning>
+  Every batch in the pairs array must be a new (not yet persisted) record. Passing already-persisted batches raises `ArgumentError`.
+</Warning>

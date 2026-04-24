@@ -1,0 +1,74 @@
+---
+title: "Migrating to GoodJob from another Active Job backend"
+description: "Transition from Sidekiq, Que, Delayed Job, or any other Active Job backend to GoodJob without dropping in-flight jobs."
+---
+
+Switching Active Job backends while your application is handling live traffic requires a careful handoff. Jobs already enqueued on the previous backend must finish processing before that backend is decommissioned, while new jobs should start going to GoodJob immediately. Running both backends in parallel for a short overlap period is the safest approach.
+
+<Steps>
+  <Step title="Enqueue new jobs on GoodJob">
+    Point new job enqueues at GoodJob while the old backend continues draining its queue.
+
+    To switch all jobs at once, update the global queue adapter:
+
+    ```ruby
+    # config/application.rb  (or an initializer)
+    config.active_job.queue_adapter = :good_job
+    ```
+
+    To migrate progressively — useful if you want to validate GoodJob with lower-risk jobs first — set the adapter per job class:
+
+    ```ruby
+    # app/jobs/specific_job.rb
+    class SpecificJob < ApplicationJob
+      self.queue_adapter = :good_job
+      # ...
+    end
+    ```
+
+    <Tip>
+      Per-class configuration takes precedence over the global setting, so you can move one job class at a time without touching `config/application.rb`.
+    </Tip>
+  </Step>
+
+  <Step title="Run both backend executors simultaneously">
+    Keep the old backend's worker process running alongside the new GoodJob worker so that pre-existing jobs are not abandoned.
+
+    On Heroku, you can run two processes within a single dyno using a `Procfile` entry that starts both executors and waits for either to exit:
+
+    ```procfile
+    # Procfile
+    worker: bundle exec que ./config/environment.rb & bundle exec good_job & wait -n
+    ```
+
+    The `wait -n` shell built-in causes the dyno to exit as soon as the first process finishes, which prevents a zombie executor from lingering after the migration is complete.
+
+    <Note>
+      The example above uses Que. Replace `bundle exec que ./config/environment.rb` with the appropriate start command for your current backend (e.g., `bundle exec sidekiq`, `bundle exec delayed_job run`).
+    </Note>
+  </Step>
+
+  <Step title="Remove the old backend">
+    Once you are confident that the previous backend's queue is fully drained — no jobs remain in its storage — you can remove it:
+
+    1. Stop the old executor process (remove it from your `Procfile` or process manager).
+    2. Remove the gem from your `Gemfile`.
+    3. Delete any initializers, configuration files, or environment variables specific to the old backend.
+    4. Drop or archive the old backend's database tables if applicable.
+
+    <Warning>
+      Verify the old queue is empty before removing the executor. Check the backend's own dashboard or queue depth metric. Removing the executor while jobs remain in the queue will cause those jobs to be lost.
+    </Warning>
+  </Step>
+</Steps>
+
+## Preserving job records during the transition
+
+GoodJob retains a record of every executed job for 14 days by default. Keeping job records intact during your migration window gives you an audit trail and lets you confirm that all jobs completed successfully.
+
+```ruby
+# config/initializers/good_job.rb
+config.good_job.preserve_job_records = true  # default — no action needed
+```
+
+You can query preserved records directly or view them in the GoodJob web dashboard to monitor completion rates and catch any errors that arise during the transition.

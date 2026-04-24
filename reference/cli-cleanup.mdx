@@ -1,0 +1,109 @@
+---
+title: "good_job cleanup_preserved_jobs — Delete old records"
+description: "Manually destroy preserved GoodJob job records older than a given age, useful when preserve_job_records is enabled in your configuration."
+---
+
+The `good_job cleanup_preserved_jobs` command deletes finished job records from the database that are older than a specified age. By default, GoodJob destroys job records immediately after execution, so this command is only needed when `GoodJob.preserve_job_records = true` is set in your configuration. Run it periodically — via cron, a scheduled job, or a deployment script — to keep your `good_jobs` table from growing unbounded.
+
+## Basic usage
+
+```bash
+bundle exec good_job cleanup_preserved_jobs
+```
+
+Without any options, the command destroys all finished job records completed more than 14 days ago.
+
+## Options
+
+<ParamField path="--before-seconds-ago" type="number" default="1209600">
+  Destroy finished job records completed more than this many seconds ago. The default value of `1209600` equals 14 days. Set a smaller value to retain fewer records, or a larger value to keep records longer.
+
+  **Environment variable:** `GOOD_JOB_CLEANUP_PRESERVED_JOBS_BEFORE_SECONDS_AGO`
+</ParamField>
+
+## When to use this command
+
+<Note>
+  If you have not set `GoodJob.preserve_job_records = true`, GoodJob already destroys job records on completion. You do not need to run `cleanup_preserved_jobs` in that case.
+</Note>
+
+You need this command when you have enabled job record preservation, which is useful for:
+
+- **Auditing** — keeping a history of all executed jobs and their outcomes.
+- **Batch tracking** — GoodJob batches require job records to remain in the database until the batch completes.
+- **Debugging** — inspecting finished job records via the web dashboard or directly in the database.
+
+When preservation is enabled, run `cleanup_preserved_jobs` regularly to prevent the `good_jobs` table from growing indefinitely. A 14-day retention window is a reasonable default for most applications.
+
+## Scheduling cleanup
+
+The command is a standard Ruby process that loads your Rails environment. You can schedule it using any mechanism available to your application.
+
+**Using GoodJob's built-in cron:**
+
+```ruby
+# config/initializers/good_job.rb
+GoodJob.configure do |config|
+  config.cron = {
+    cleanup: {
+      cron: "0 2 * * *",       # daily at 02:00
+      class: "CleanupJob",
+    }
+  }
+end
+```
+
+```ruby
+# app/jobs/cleanup_job.rb
+class CleanupJob < ApplicationJob
+  def perform
+    GoodJob.cleanup_preserved_jobs(
+      older_than: GoodJob.configuration.cleanup_preserved_jobs_before_seconds_ago
+    )
+  end
+end
+```
+
+**Using a system cron or Heroku Scheduler:**
+
+```bash
+# Run daily, removing records older than 7 days (604800 seconds)
+bundle exec good_job cleanup_preserved_jobs --before-seconds-ago=604800
+```
+
+## Usage examples
+
+Delete all finished records older than 14 days (default):
+
+```bash
+bundle exec good_job cleanup_preserved_jobs
+```
+
+Delete records older than 7 days:
+
+```bash
+bundle exec good_job cleanup_preserved_jobs --before-seconds-ago=604800
+```
+
+Delete records older than 30 days, configured via environment variable:
+
+<CodeGroup>
+
+```bash CLI flag
+bundle exec good_job cleanup_preserved_jobs --before-seconds-ago=2592000
+```
+
+```bash Environment variable
+GOOD_JOB_CLEANUP_PRESERVED_JOBS_BEFORE_SECONDS_AGO=2592000 \
+  bundle exec good_job cleanup_preserved_jobs
+```
+
+</CodeGroup>
+
+<Warning>
+  Deleted job records cannot be recovered. Ensure your retention window is long enough for any auditing, reporting, or batch completion requirements before running cleanup.
+</Warning>
+
+<Tip>
+  Run `bundle exec good_job help cleanup_preserved_jobs` to print all options directly from your installed version of GoodJob.
+</Tip>

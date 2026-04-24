@@ -1,0 +1,156 @@
+---
+title: "GoodJob Execution Modes: inline, async, and external"
+description: "Understand GoodJob's four execution modes — inline, external, async, and async_all — with per-environment defaults and guidance on when to use each."
+---
+
+GoodJob's execution mode determines which process actually runs your jobs and when. Choosing the right mode is the most important configuration decision you'll make, because it affects infrastructure costs, latency, and operational complexity. GoodJob ships with sensible per-environment defaults so you can get started immediately, but understanding the trade-offs helps you tune for production.
+
+## The four modes
+
+<Tabs>
+  <Tab title=":inline">
+    Jobs execute **immediately and synchronously** in the same process that enqueued them — usually your web server. The caller blocks until the job finishes.
+
+    **When to use:** Test environments, local development scripts, or simple command-line tasks where you want zero background infrastructure.
+
+    <Warning>
+      Never use `:inline` in production. Long-running or failing jobs will block web requests and can exhaust your Puma thread pool.
+    </Warning>
+
+    ```ruby
+    config.good_job.execution_mode = :inline
+    ```
+  </Tab>
+  <Tab title=":external">
+    Jobs are written to the database but **not executed** by the enqueueing process. A separate `good_job` worker process (started via the CLI) polls the database and runs them.
+
+    **When to use:** Production environments. Gives you full control over worker scaling, resource isolation, and deployment lifecycles.
+
+    ```ruby
+    config.good_job.execution_mode = :external
+    ```
+  </Tab>
+  <Tab title=":async / :async_server">
+    Jobs execute in **background threads inside the Rails web server process**. `:async` and `:async_server` are aliases — both activate only when running inside a web server (Puma, etc.). When the same configuration is detected in a non-server context (`rails console`, `rails db:migrate`, cron tasks), GoodJob automatically falls back to `:external` to avoid accidentally running jobs in those processes.
+
+    **When to use:** Small workloads, review apps, or staging environments where you want to avoid running a separate worker process.
+
+    <Note>
+      If your web server is under heavy load or your jobs are CPU/memory intensive, prefer `:external` to avoid resource contention.
+    </Note>
+
+    ```ruby
+    config.good_job.execution_mode = :async
+    ```
+  </Tab>
+  <Tab title=":async_all">
+    Like `:async`, but jobs execute in background threads in **any** Rails process — web servers, consoles, rake tasks, and anything else that loads your application.
+
+    **When to use:** Only when you explicitly want jobs to run in non-server processes. This is rarely the right choice for production.
+
+    <Warning>
+      With `:async_all`, jobs will run inside `rails console`, `rails db:migrate`, and similar commands. This is almost never desired and can cause unexpected behaviour during maintenance operations.
+    </Warning>
+
+    ```ruby
+    config.good_job.execution_mode = :async_all
+    ```
+  </Tab>
+</Tabs>
+
+---
+
+## Default mode per environment
+
+GoodJob automatically picks a sensible default based on `Rails.env` so you do not need to configure anything to get started:
+
+```ruby config/environments/development.rb
+config.active_job.queue_adapter  = :good_job
+config.good_job.execution_mode   = :async
+```
+
+```ruby config/environments/test.rb
+config.active_job.queue_adapter  = :good_job
+config.good_job.execution_mode   = :inline
+```
+
+```ruby config/environments/production.rb
+config.active_job.queue_adapter  = :good_job
+config.good_job.execution_mode   = :external
+```
+
+<Tip>
+  You only need to set `execution_mode` explicitly when you want to override the default — for example, to run `:external` in a staging environment that mirrors production.
+</Tip>
+
+---
+
+## Setting the mode
+
+You can configure the execution mode in three ways:
+
+<CodeGroup>
+
+```ruby Rails initializer
+# config/initializers/good_job.rb
+Rails.application.configure do
+  config.good_job.execution_mode = :async
+end
+```
+
+```ruby Environment file
+# config/environments/production.rb
+Rails.application.configure do
+  config.good_job.execution_mode = :external
+end
+```
+
+```bash Environment variable
+GOOD_JOB_EXECUTION_MODE=external bundle exec good_job start
+```
+
+</CodeGroup>
+
+---
+
+## Mode comparison
+
+| Mode | Where jobs run | Requires separate process | Safe in production |
+|---|---|---|---|
+| `:inline` | Caller thread | No | No |
+| `:external` | `good_job start` worker | Yes | Yes |
+| `:async` / `:async_server` | Web server threads | No | Yes (small workloads) |
+| `:async_all` | Any Rails process | No | Rarely |
+
+---
+
+## Async mode and Puma
+
+When using `:async` with Puma, you should hook into Puma's lifecycle to cleanly shut down and restart GoodJob's background threads when Puma forks or restarts workers.
+
+```ruby config/puma.rb
+before_fork { GoodJob.shutdown }
+on_worker_boot { GoodJob.restart }
+on_worker_shutdown { GoodJob.shutdown }
+
+# When using Puma's clustered mode (multiple workers), prefer :external
+# because each forked Puma worker will spin up its own GoodJob threads.
+```
+
+<Note>
+  In clustered Puma (multiple workers), each worker process runs its own set of GoodJob threads. This multiplies DB connections and thread counts — factor that into your [database connection pool size](/configuration/database-connections).
+</Note>
+
+---
+
+## CLI and async interaction
+
+When you start GoodJob with `bundle exec good_job start`, the CLI forces `:external` mode even if your application configuration specifies `:async` or `:async_server`. This prevents double-execution: the dedicated worker process runs jobs via `:external`, while the web server stays in `:async` for in-process execution.
+
+```bash
+# Start a dedicated external worker
+bundle exec good_job start
+
+# Override execution mode at the CLI level
+bundle exec good_job start --execution-mode=external
+```

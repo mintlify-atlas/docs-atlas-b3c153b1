@@ -1,0 +1,81 @@
+---
+title: "Job Priority: Run Critical Jobs First in GoodJob"
+description: "Control which jobs run first using Active Job's priority field. Lower numbers mean higher priority in GoodJob v4, matching Active Job's own convention."
+---
+
+GoodJob supports Active Job's built-in `priority` field to control the order in which jobs are executed. A lower number means higher priority — a job with priority `1` runs before a job with priority `10`. The default priority is `0`.
+
+## Setting priority
+
+Use Active Job's `.set(priority:)` to assign a priority when enqueuing a job.
+
+```ruby
+# High priority — runs before default-priority jobs
+CriticalJob.set(priority: -10).perform_later
+
+# Default priority
+NormalJob.perform_later
+
+# Low priority — runs after default-priority jobs
+ReportJob.set(priority: 10).perform_later
+```
+
+You can also set a default priority at the class level:
+
+```ruby
+class CriticalJob < ApplicationJob
+  queue_with_priority -10
+
+  def perform
+    # ...
+  end
+end
+```
+
+## Priority convention in GoodJob v4
+
+GoodJob v4 aligns with Active Job's own priority convention: **smaller numbers have higher priority**. This is the same direction used by most job backends and matches the [Active Job source definition](https://github.com/rails/rails/blob/main/activejob/lib/active_job/core.rb).
+
+| Priority value | Meaning             |
+| -------------- | ------------------- |
+| `-10` (or lower) | Very high priority |
+| `0`            | Default             |
+| `10` (or higher) | Low priority       |
+
+## Migrating from GoodJob v3
+
+GoodJob v3 and earlier used the **opposite** convention — higher numbers ran first. If you are upgrading from v3, you need to opt in to the new behavior before upgrading to v4.
+
+<Steps>
+  <Step title="Enable the v4 priority convention while on v3">
+    Add this setting to your GoodJob initializer or `application.rb`:
+
+    ```ruby
+    # config/initializers/good_job.rb
+    config.good_job.smaller_number_is_higher_priority = true
+    ```
+
+    This switches priority ordering to the v4 convention while still running v3.
+  </Step>
+  <Step title="Audit your priority values">
+    Review any jobs that use explicit priorities. If a job was set to `priority: 100` to run first under the old convention, it will now run _last_. Adjust values to match the new direction.
+  </Step>
+  <Step title="Upgrade to GoodJob v4">
+    Once your priority values are corrected and the new convention is enabled, upgrade the gem. The `smaller_number_is_higher_priority` setting is the default in v4 and no longer needs to be set explicitly.
+  </Step>
+</Steps>
+
+## Priority and queue pools
+
+Priority ordering only applies within the set of jobs that a given worker thread pool is able to pick up. When you configure separate queue pools, each pool sees only its own queues.
+
+```ruby
+# config/initializers/good_job.rb
+config.good_job.queues = "critical:2;default:4"
+```
+
+In this configuration, the two threads assigned to `critical` will always pull from that queue first, regardless of priority. Priority then determines order _within_ that queue when multiple jobs are waiting.
+
+<Tip>
+Use queue pools to guarantee capacity for a class of work. Use priority to order jobs _within_ a queue when multiple jobs are competing for the same threads.
+</Tip>

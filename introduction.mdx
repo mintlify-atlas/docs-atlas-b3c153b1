@@ -1,0 +1,59 @@
+---
+title: "Introduction to GoodJob: Postgres-based Active Job"
+description: "GoodJob is a multithreaded, Postgres-based Active Job backend for Ruby on Rails — no Redis required, fully ACID-compliant, with a built-in web dashboard."
+---
+
+GoodJob is a multithreaded, Postgres-based Active Job backend for Ruby on Rails. Inspired by Delayed::Job and Que, it is designed for maximum compatibility with Rails, Active Job, and Postgres — delivering reliable job execution with near-zero configuration and no additional infrastructure beyond the database you already run.
+
+## Why GoodJob?
+
+Most Rails teams already operate a Postgres database. GoodJob lets you run a production-grade background job system on that same database, eliminating the operational overhead of managing Redis or a separate job store. It implements the full Active Job interface, so existing jobs work without modification.
+
+<CardGroup cols={2}>
+  <Card title="Built for Rails" icon="gem">
+    Fully adopts Rails threading and code execution guidelines using Concurrent::Ruby. Works with `schema.rb` — no `structure.sql` required.
+  </Card>
+  <Card title="Backed by Postgres" icon="database">
+    Uses Postgres ACID transactions, session-level advisory locks for run-once safety, and LISTEN/NOTIFY for low-latency job dispatch.
+  </Card>
+  <Card title="Fully featured" icon="star">
+    Cron-style scheduled jobs, batches, concurrency and throttling controls, bulk enqueue, job pausing, and a web dashboard included.
+  </Card>
+  <Card title="Flexible deployment" icon="server">
+    Run jobs inside your web process for economy, or scale as an independent CLI process — works the same across development, test, and production.
+  </Card>
+  <Card title="Complete Active Job support" icon="check">
+    Full support for async, queues, delays, priorities, timeouts, and retries with near-zero configuration beyond setting the adapter.
+  </Card>
+  <Card title="For most workloads" icon="chart-line">
+    Targets full-stack teams, solo developers, and applications that enqueue 1 million jobs per day and more.
+  </Card>
+</CardGroup>
+
+## How GoodJob compares
+
+The table below compares GoodJob with other common Active Job backends across the dimensions that matter most for production reliability.
+
+|                 | Queues, priority, retries | Database                                        | Concurrency                        | Reliability / integrity         | Latency                   |
+| --------------- | ------------------------- | ----------------------------------------------- | ---------------------------------- | ------------------------------- | ------------------------- |
+| **GoodJob**     | Yes                       | Postgres                                        | Multithreaded                      | ACID, advisory locks            | Postgres LISTEN/NOTIFY    |
+| **Solid Queue** | Yes                       | Postgres and other databases                    | Multithreaded in forked process    | ACID, advisory locks            | Polling                   |
+| **Que**         | Yes                       | Postgres (requires `structure.sql`)             | Multithreaded                      | ACID, advisory locks            | Postgres LISTEN/NOTIFY    |
+| **Delayed::Job** | Yes                      | Postgres                                        | Single-threaded                    | ACID, record-based              | Polling                   |
+| **Sidekiq**     | Yes                       | Redis                                           | Multithreaded                      | Crashes lose jobs               | Redis BRPOP               |
+| **Sidekiq Pro** | Yes                       | Redis                                           | Multithreaded                      | Redis RPOPLPUSH                 | Redis RPOPLPUSH           |
+
+Key differences to note:
+
+- **Sidekiq** stores jobs in Redis, which offers no ACID guarantees. A crash between enqueue and acknowledgement can lose jobs. Sidekiq Pro adds reliability via `RPOPLPUSH`, but Redis remains the store.
+- **Que** requires `structure.sql` instead of `schema.rb` because it uses Postgres-native stored functions. GoodJob avoids this constraint entirely.
+- **Solid Queue** runs its thread pool inside a forked process rather than in-process threads, and relies on polling rather than LISTEN/NOTIFY, which adds latency.
+- **Delayed::Job** is single-threaded and polling-based, limiting throughput on busy queues.
+
+GoodJob combines in-process multithreading, LISTEN/NOTIFY-based dispatch, and full ACID integrity while remaining compatible with `schema.rb`.
+
+## Ready to install?
+
+<Card title="Installation" icon="download" href="/installation">
+  Add GoodJob to your Rails app in four steps: gem, migration, adapter configuration, and your first job.
+</Card>
